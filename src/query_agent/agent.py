@@ -70,6 +70,7 @@ class AgentState(TypedDict):
     """State for the RAG agent graph."""
     # Input
     original_query: str
+    document_ids: Optional[List[int]]  # Optional filter for specific documents
     
     # Query processing
     current_query: str
@@ -114,6 +115,7 @@ def get_llm():
 def retrieve_similar_chunks(
     query: str,
     top_k: int = TOP_K_RESULTS,
+    document_ids: Optional[List[int]] = None,
     db: Optional[Session] = None
 ) -> List[Dict[str, Any]]:
     """
@@ -122,6 +124,7 @@ def retrieve_similar_chunks(
     Args:
         query: The search query
         top_k: Number of results to return
+        document_ids: Optional list of document IDs to filter by
         db: Optional database session
         
     Returns:
@@ -131,11 +134,18 @@ def retrieve_similar_chunks(
     query_embedding = embedding_model.encode_single(query)
     
     def do_search(session: Session) -> List[Dict[str, Any]]:
-        # Use pgvector's cosine distance for similarity search
-        results = session.query(
+        # Build base query with pgvector cosine distance
+        base_query = session.query(
             DocumentChunk,
             DocumentChunk.embedding.cosine_distance(query_embedding).label('distance')
-        ).join(Document).order_by('distance').limit(top_k).all()
+        ).join(Document)
+        
+        # Apply document filter if specified
+        if document_ids:
+            base_query = base_query.filter(DocumentChunk.document_id.in_(document_ids))
+        
+        # Order by distance and limit results
+        results = base_query.order_by('distance').limit(top_k).all()
         
         chunks = []
         for chunk, distance in results:
@@ -230,7 +240,10 @@ def retrieve_documents(state: AgentState) -> AgentState:
     """
     Retrieve relevant documents for the current query.
     """
-    chunks = retrieve_similar_chunks(state['current_query'])
+    chunks = retrieve_similar_chunks(
+        state['current_query'],
+        document_ids=state.get('document_ids')
+    )
     
     state['retrieved_chunks'] = chunks
     state['context'] = format_context(chunks)
@@ -586,13 +599,18 @@ def build_agent_graph():
 agent_graph = build_agent_graph()
 
 
-def query_policy_documents(query: str, verbose: bool = False) -> Dict[str, Any]:
+def query_policy_documents(
+    query: str,
+    verbose: bool = False,
+    document_ids: Optional[List[int]] = None
+) -> Dict[str, Any]:
     """
     Main function to query policy documents using the agentic RAG system.
     
     Args:
         query: The user's question about policies
         verbose: Whether to include reasoning steps in the response
+        document_ids: Optional list of document IDs to filter search
         
     Returns:
         Dictionary with answer, sources, and optionally reasoning steps
@@ -600,6 +618,7 @@ def query_policy_documents(query: str, verbose: bool = False) -> Dict[str, Any]:
     # Initialize state
     initial_state: AgentState = {
         "original_query": query,
+        "document_ids": document_ids,
         "current_query": query,
         "sub_queries": [],
         "sub_query_index": 0,

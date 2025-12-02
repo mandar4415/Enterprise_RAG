@@ -21,7 +21,8 @@ from src.ingestion.pipeline import (
     ingest_document,
     delete_document,
     get_document_info,
-    list_documents
+    list_documents,
+    check_duplicate_document
 )
 from src.query_agent.agent import query_policy_documents
 from src.utils.helpers import validate_file_extension, get_file_type
@@ -35,12 +36,14 @@ class QueryRequest(BaseModel):
     """Request model for policy queries."""
     query: str = Field(..., description="The question to ask about policy documents")
     verbose: bool = Field(default=False, description="Include reasoning steps in response")
+    document_ids: Optional[List[int]] = Field(default=None, description="Filter by specific document IDs (optional)")
     
     class Config:
         json_schema_extra = {
             "example": {
                 "query": "What is the policy for requesting time off?",
-                "verbose": False
+                "verbose": False,
+                "document_ids": None
             }
         }
 
@@ -187,6 +190,7 @@ async def health_check():
     summary="Upload a policy document",
     responses={
         400: {"model": ErrorResponse, "description": "Invalid file"},
+        409: {"model": ErrorResponse, "description": "Document already exists"},
         413: {"model": ErrorResponse, "description": "File too large"},
         500: {"model": ErrorResponse, "description": "Server error"}
     }
@@ -229,6 +233,14 @@ async def upload_document(
         raise HTTPException(
             status_code=400,
             detail="Empty file uploaded"
+        )
+    
+    # Check for duplicate document
+    existing_doc = check_duplicate_document(file.filename, file_size)
+    if existing_doc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Document already exists. Filename: '{existing_doc['filename']}' was uploaded on {existing_doc['created_at']} (Document ID: {existing_doc['id']})"
         )
     
     # Save file temporarily
@@ -292,6 +304,7 @@ async def query_documents(request: QueryRequest):
     5. Generate a comprehensive answer with source citations
     
     Set `verbose=true` to see the reasoning steps.
+    Set `document_ids=[1,2,3]` to search only specific documents.
     """
     if not request.query.strip():
         raise HTTPException(
@@ -302,7 +315,8 @@ async def query_documents(request: QueryRequest):
     try:
         result = query_policy_documents(
             query=request.query,
-            verbose=request.verbose
+            verbose=request.verbose,
+            document_ids=request.document_ids
         )
         
         return QueryResponse(

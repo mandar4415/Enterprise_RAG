@@ -179,7 +179,7 @@ def ingest_document(
     # Step 5: Store in database
     print("Storing in database...")
     
-    def store_to_db(session: Session) -> Document:
+    def store_to_db(session: Session) -> int:
         # Create document record
         document = Document(
             filename=filename,
@@ -191,10 +191,13 @@ def ingest_document(
         session.add(document)
         session.flush()  # Get the document ID
         
+        # Store the ID before we lose access to the object
+        doc_id = document.id
+        
         # Create chunk records
         for chunk_data in chunks_with_embeddings:
             chunk = DocumentChunk(
-                document_id=document.id,
+                document_id=doc_id,
                 content=chunk_data["content"],
                 chunk_index=chunk_data["chunk_index"],
                 start_char=chunk_data["start_char"],
@@ -203,20 +206,20 @@ def ingest_document(
             )
             session.add(chunk)
         
-        return document
+        return doc_id
     
     # Use provided session or create a new one
     if db:
-        document = store_to_db(db)
+        document_id = store_to_db(db)
         db.commit()
     else:
         with get_db_context() as session:
-            document = store_to_db(session)
+            document_id = store_to_db(session)
     
-    print(f"Document ingested successfully! ID: {document.id}")
+    print(f"Document ingested successfully! ID: {document_id}")
     
     return {
-        "document_id": document.id,
+        "document_id": document_id,
         "filename": filename,
         "file_type": get_file_type(filename),
         "file_size": file_size,
@@ -317,3 +320,42 @@ def list_documents(db: Optional[Session] = None) -> List[Dict[str, Any]]:
     else:
         with get_db_context() as session:
             return do_list(session)
+
+
+def check_duplicate_document(
+    filename: str,
+    file_size: int,
+    db: Optional[Session] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Check if a document with the same filename and size already exists.
+    
+    Args:
+        filename: Name of the file to check
+        file_size: Size of the file in bytes
+        db: Optional database session
+        
+    Returns:
+        Document info dict if duplicate found, None otherwise
+    """
+    def do_check(session: Session) -> Optional[Dict[str, Any]]:
+        # Check for exact match on filename and file_size
+        existing = session.query(Document).filter(
+            Document.filename == filename,
+            Document.file_size == file_size
+        ).first()
+        
+        if existing:
+            return {
+                "id": existing.id,
+                "filename": existing.filename,
+                "title": existing.title,
+                "created_at": existing.created_at.isoformat()
+            }
+        return None
+    
+    if db:
+        return do_check(db)
+    else:
+        with get_db_context() as session:
+            return do_check(session)
