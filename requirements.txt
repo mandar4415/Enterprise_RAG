@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-dotenv
+psycopg2-binary
+sqlalchemy
+langchain
+langgraph
+pypdf
+python-docx
+sentence-transformers
+pgvector
+google-generativeai   # Gemini API client
