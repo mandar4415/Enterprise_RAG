@@ -6,13 +6,29 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 from contextlib import contextmanager
 from typing import Generator
+from urllib.parse import quote_plus
 
-from src.core.config import DATABASE_URL
+from src.core.config import DATABASE_URL, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME
 
 
-# Create the database engine
+def get_database_url() -> str:
+    """
+    Construct a properly encoded database URL.
+    Handles special characters in passwords by URL-encoding them.
+    """
+    if DATABASE_URL:
+        # If we have individual components, construct URL with proper encoding
+        if DB_PASSWORD and ('@' in DB_PASSWORD or ':' in DB_PASSWORD or '/' in DB_PASSWORD):
+            # URL-encode the password to handle special characters
+            encoded_password = quote_plus(DB_PASSWORD)
+            return f"postgresql+psycopg2://{DB_USER}:{encoded_password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    return DATABASE_URL
+
+
+# Create the database engine with properly encoded URL
+database_url = get_database_url()
 engine = create_engine(
-    DATABASE_URL,
+    database_url,
     pool_size=5,
     max_overflow=10,
     pool_pre_ping=True,  # Enable connection health checks
