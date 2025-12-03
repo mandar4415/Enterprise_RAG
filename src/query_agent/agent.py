@@ -17,11 +17,16 @@ from src.core.config import (
     TOP_K_RESULTS,
     MAX_CORRECTION_ATTEMPTS,
     MAX_PLANNING_STEPS,
-    EMBEDDING_DIMENSION
+    EMBEDDING_DIMENSION,
+    TOP_K_RERANK_CANDIDATES,
+    TOP_K_AFTER_RERANK,
+    SIMILARITY_THRESHOLD,
+    ENABLE_RERANKING
 )
 from src.db.models import DocumentChunk, Document
 from src.db.connection import get_db_context
 from src.ingestion.pipeline import embedding_model
+from src.retrieval.reranker import rerank_chunks
 
 
 # =============================================================================
@@ -116,22 +121,28 @@ def retrieve_similar_chunks(
     query: str,
     top_k: int = TOP_K_RESULTS,
     document_ids: Optional[List[int]] = None,
-    db: Optional[Session] = None
+    db: Optional[Session] = None,
+    use_reranking: bool = ENABLE_RERANKING
 ) -> List[Dict[str, Any]]:
     """
     Retrieve the most similar document chunks for a query using pgvector.
+    Optionally applies cross-encoder re-ranking for improved precision.
     
     Args:
         query: The search query
         top_k: Number of results to return
         document_ids: Optional list of document IDs to filter by
         db: Optional database session
+        use_reranking: Whether to apply re-ranking (default: True)
         
     Returns:
         List of chunk dictionaries with content and metadata
     """
     # Generate query embedding
     query_embedding = embedding_model.encode_single(query)
+    
+    # If re-ranking is enabled, retrieve more candidates initially
+    initial_top_k = TOP_K_RERANK_CANDIDATES if use_reranking else top_k
     
     def do_search(session: Session) -> List[Dict[str, Any]]:
         # Build base query with pgvector cosine distance
@@ -145,10 +156,16 @@ def retrieve_similar_chunks(
             base_query = base_query.filter(DocumentChunk.document_id.in_(document_ids))
         
         # Order by distance and limit results
-        results = base_query.order_by('distance').limit(top_k).all()
+        results = base_query.order_by('distance').limit(initial_top_k).all()
         
         chunks = []
         for chunk, distance in results:
+            similarity = 1 - distance  # Convert distance to similarity
+            
+            # Apply similarity threshold filter
+            if similarity < SIMILARITY_THRESHOLD:
+                continue
+                
             chunks.append({
                 "id": chunk.id,
                 "document_id": chunk.document_id,
@@ -156,15 +173,24 @@ def retrieve_similar_chunks(
                 "chunk_index": chunk.chunk_index,
                 "document_name": chunk.document.filename,
                 "document_title": chunk.document.title,
-                "similarity_score": 1 - distance  # Convert distance to similarity
+                "similarity_score": similarity
             })
         return chunks
     
     if db:
-        return do_search(db)
+        chunks = do_search(db)
     else:
         with get_db_context() as session:
-            return do_search(session)
+            chunks = do_search(session)
+    
+    # Apply re-ranking if enabled and we have chunks
+    if use_reranking and chunks:
+        chunks = rerank_chunks(query, chunks, top_k=top_k)
+    else:
+        # Just take top_k if no re-ranking
+        chunks = chunks[:top_k]
+    
+    return chunks
 
 
 def format_context(chunks: List[Dict[str, Any]]) -> str:
@@ -174,8 +200,10 @@ def format_context(chunks: List[Dict[str, Any]]) -> str:
     
     context_parts = []
     for i, chunk in enumerate(chunks, 1):
+        # Include relevance score for transparency
+        score = chunk.get('rerank_score', chunk.get('similarity_score', 0))
         context_parts.append(
-            f"[Source {i}: {chunk['document_title']} (chunk {chunk['chunk_index']})]\n"
+            f"[Source {i}: {chunk['document_title']} (chunk {chunk['chunk_index']}, relevance: {score:.2f})]\n"
             f"{chunk['content']}\n"
         )
     
@@ -239,15 +267,24 @@ This breaks into: ["What is the policy for using personal devices for work?", "W
 def retrieve_documents(state: AgentState) -> AgentState:
     """
     Retrieve relevant documents for the current query.
+    Uses re-ranking for improved context precision.
     """
     chunks = retrieve_similar_chunks(
         state['current_query'],
-        document_ids=state.get('document_ids')
+        document_ids=state.get('document_ids'),
+        use_reranking=ENABLE_RERANKING
     )
     
     state['retrieved_chunks'] = chunks
     state['context'] = format_context(chunks)
-    state['reasoning_steps'].append(f"Retrieval: Found {len(chunks)} relevant document chunks.")
+    
+    if ENABLE_RERANKING and chunks:
+        avg_score = sum(c.get('rerank_score', 0) for c in chunks) / len(chunks)
+        state['reasoning_steps'].append(
+            f"Retrieval: Found {len(chunks)} relevant chunks (re-ranked, avg score: {avg_score:.2f})"
+        )
+    else:
+        state['reasoning_steps'].append(f"Retrieval: Found {len(chunks)} relevant document chunks.")
     
     return state
 
@@ -333,34 +370,45 @@ def generate_answer(state: AgentState) -> AgentState:
     llm = get_llm()
     
     system_prompt = """You are an expert policy assistant helping employees understand company policies and procedures.
-Your answers should be:
-- Clear and concise
-- Based strictly on the provided context
-- Professional in tone
-- If the context doesn't contain enough information, say so clearly
 
-Always cite which source document(s) you're using to answer."""
+CRITICAL RULES - YOU MUST FOLLOW THESE:
+1. ONLY use information that is EXPLICITLY stated in the provided context
+2. DO NOT add any information from your general knowledge
+3. DO NOT make inferences or assumptions beyond what the context states
+4. If the context doesn't contain enough information, clearly say "Based on the provided documents, I don't have information about [topic]"
+5. Always cite which source document(s) you're using with (Source X) format
+6. Be concise and professional
+7. If you're uncertain about something, express that uncertainty
+
+IMPORTANT: Hallucinating information not in the context is a serious error. When in doubt, say you don't have that information."""
     
     if state['sub_queries'] and len(state['sub_queries']) > 1:
         # Multi-step: generate partial answer for sub-query
-        user_prompt = f"""Based on the following policy documents, answer this specific question:
+        user_prompt = f"""Based ONLY on the following policy documents, answer this specific question:
 
 Question: {state['current_query']}
 
 Context from policy documents:
 {state['context']}
 
-Provide a focused answer to this specific question. This is part of a larger query."""
+REMEMBER: Only use information explicitly stated in the context above. Do not add any information from your training data.
+Provide a focused answer to this specific question. Cite sources using (Source X) format."""
     else:
         # Simple query: generate final answer
-        user_prompt = f"""Based on the following policy documents, answer this question:
+        user_prompt = f"""Based ONLY on the following policy documents, answer this question:
 
 Question: {state['original_query']}
 
 Context from policy documents:
 {state['context']}
 
-Provide a comprehensive but concise answer. If the information is not available in the context, clearly state that."""
+REMEMBER: 
+- Only use information explicitly stated in the context above
+- Do not add any information from your training data  
+- If information is missing, say so clearly
+- Cite sources using (Source X) format
+
+Provide a comprehensive but concise answer."""
     
     try:
         messages = [
@@ -383,6 +431,7 @@ Provide a comprehensive but concise answer. If the information is not available 
                 {
                     "document": chunk['document_title'],
                     "chunk": chunk['chunk_index'],
+                    "relevance_score": round(chunk.get('rerank_score', chunk.get('similarity_score', 0)), 3),
                     "preview": chunk['content'][:200] + "..."
                 }
                 for chunk in state['retrieved_chunks'][:5]

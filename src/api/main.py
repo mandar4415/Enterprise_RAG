@@ -499,10 +499,10 @@ async def remove_document(document_id: int):
 # =============================================================================
 
 @app.post(
-    "/evaluate",
+    "/evaluate/offline",
     response_model=EvaluationResponse,
     tags=["Evaluation"],
-    summary="Evaluate a RAG query result",
+    summary="[Offline] Evaluate pre-collected RAG results",
     responses={
         400: {"model": ErrorResponse, "description": "Invalid request"},
         500: {"model": ErrorResponse, "description": "Evaluation failed"}
@@ -510,9 +510,18 @@ async def remove_document(document_id: int):
 )
 async def evaluate_rag_result(request: EvaluationRequest):
     """
-    Evaluate the quality of a RAG query result.
+    [OFFLINE MODE] Evaluate pre-collected RAG query results.
     
-    Metrics evaluated:
+    Use this endpoint when you have already run queries and collected the results.
+    You provide the query, answer, and contexts - this endpoint only evaluates them.
+    
+    **Use cases:**
+    - Batch evaluation of collected RAG results
+    - A/B testing different prompts or configurations
+    - Analyzing production logs
+    - Creating benchmark test sets
+    
+    **Metrics evaluated:**
     - **Faithfulness**: Does the answer stick to the context? (detects hallucinations)
     - **Answer Relevancy**: Does the answer address the question?
     - **Context Precision**: How relevant was the retrieved context?
@@ -520,7 +529,6 @@ async def evaluate_rag_result(request: EvaluationRequest):
     - **Completeness**: Is the answer complete?
     
     Scores range from 0-1, higher is better.
-    An overall weighted score is also provided.
     """
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
@@ -579,10 +587,10 @@ async def evaluate_rag_result(request: EvaluationRequest):
 
 
 @app.post(
-    "/query-and-evaluate",
+    "/evaluate/live",
     response_model=QueryAndEvaluateResponse,
     tags=["Evaluation"],
-    summary="Query documents and evaluate the result",
+    summary="[Live] Query and evaluate end-to-end RAG pipeline",
     responses={
         400: {"model": ErrorResponse, "description": "Invalid request"},
         500: {"model": ErrorResponse, "description": "Query or evaluation failed"}
@@ -590,17 +598,21 @@ async def evaluate_rag_result(request: EvaluationRequest):
 )
 async def query_and_evaluate(request: QueryAndEvaluateRequest):
     """
-    Query policy documents AND automatically evaluate the RAG result.
+    [LIVE MODE] Query the RAG pipeline and automatically evaluate the result.
     
-    This is a convenience endpoint that:
-    1. Runs your query through the RAG pipeline
+    This is an end-to-end test endpoint that:
+    1. Runs your query through the complete RAG pipeline (retrieval → generation)
     2. Automatically evaluates the quality of the result
     3. Returns both the answer and evaluation metrics
     
-    Use this for:
-    - Testing the quality of your RAG system
-    - A/B testing different configurations
-    - Monitoring production quality
+    **Use this for:**
+    - Real-time testing of your RAG system
+    - Monitoring production query quality
+    - Identifying retrieval or generation issues
+    - Performance benchmarking
+    
+    **Note:** This endpoint is slower than `/query` because it runs 5 additional 
+    LLM calls for evaluation. Use `/query` for production and this for testing.
     """
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
@@ -682,8 +694,8 @@ async def root():
             "upload": "/upload",
             "query": "/query",
             "documents": "/documents",
-            "evaluate": "/evaluate",
-            "query-and-evaluate": "/query-and-evaluate",
+            "evaluate-offline": "/evaluate/offline",
+            "evaluate-live": "/evaluate/live",
             "docs": "/docs"
         }
     }

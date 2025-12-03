@@ -58,8 +58,21 @@ CHUNK_OVERLAP = 200  # Overlap between chunks for context continuity
 # Number of documents to retrieve for each query
 TOP_K_RESULTS = 5
 
+# Number of initial candidates for re-ranking (retrieve more, then filter)
+TOP_K_RERANK_CANDIDATES = 15
+
+# Final number of chunks after re-ranking
+TOP_K_AFTER_RERANK = 5
+
 # Similarity threshold for relevance filtering (0.0 to 1.0)
-SIMILARITY_THRESHOLD = 0.5
+# Chunks below this threshold will be filtered out
+SIMILARITY_THRESHOLD = 0.3
+
+# Minimum similarity score to be considered relevant (stricter filter)
+MIN_RELEVANCE_SCORE = 0.4
+
+# Enable re-ranking with cross-encoder
+ENABLE_RERANKING = True
 
 # =============================================================================
 # FILE UPLOAD CONFIGURATION
