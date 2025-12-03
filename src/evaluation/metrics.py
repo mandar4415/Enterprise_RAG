@@ -141,11 +141,22 @@ RETRIEVED CONTEXT:
 GENERATED ANSWER:
 {sample.generated_answer}
 
-INSTRUCTIONS:
+CRITICAL INSTRUCTIONS:
 1. Extract all factual claims from the answer
-2. Check each claim against the context
-3. Claims NOT found in context are hallucinations
-4. Score = (supported claims) / (total claims)
+2. For EACH claim, carefully search the ENTIRE context for supporting evidence
+3. A claim is SUPPORTED if:
+   - The exact information appears in the context, OR
+   - The information is a reasonable paraphrase of context content, OR
+   - The information can be directly inferred from explicit context statements
+4. A claim is UNSUPPORTED (hallucination) ONLY if:
+   - The information does NOT appear anywhere in the context
+   - The information contradicts the context
+   - The information adds details not mentioned in the context
+5. Be GENEROUS in determining support - if the claim's meaning matches context content, it's supported
+6. Score = (supported claims) / (total claims)
+
+IMPORTANT: Do NOT flag claims as hallucinations if they paraphrase or summarize context content.
+Only flag claims that introduce genuinely NEW information not in the context.
 
 Provide your evaluation:
 """

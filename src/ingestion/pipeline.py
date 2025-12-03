@@ -1,20 +1,35 @@
 """
 Document ingestion pipeline for Deep Agent - Policy Edition
 Handles document processing, chunking, embedding generation, and storage
+
+Improvements:
+- Nomic Embed v1.5 with Matryoshka support for flexible dimensions
+- Semantic chunking for better context preservation
+- Metadata filtering to improve context precision
 """
 import os
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+import numpy as np
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 from sqlalchemy.orm import Session
+import torch.nn.functional as F
+import torch
 
 from src.core.config import (
     CHUNK_SIZE,
     CHUNK_OVERLAP,
     EMBEDDING_MODEL_NAME,
-    EMBEDDING_DIMENSION
+    EMBEDDING_DIMENSION,
+    MATRYOSHKA_DIM,
+    EMBEDDING_PREFIX_DOCUMENT,
+    EMBEDDING_PREFIX_QUERY,
+    ENABLE_SEMANTIC_CHUNKING,
+    SEMANTIC_CHUNK_BREAKPOINT_THRESHOLD,
+    FILTER_METADATA_CHUNKS,
+    METADATA_KEYWORDS
 )
 from src.db.models import Document, DocumentChunk
 from src.db.connection import get_db_context
@@ -23,8 +38,8 @@ from src.utils.helpers import extract_text, clean_text, get_file_type
 
 class EmbeddingModel:
     """
-    Singleton class for the embedding model to avoid reloading.
-    Uses sentence-transformers for generating embeddings.
+    Singleton class for the embedding model.
+    Uses nomic-embed-text-v1.5 with Matryoshka support for flexible dimensions.
     """
     _instance = None
     _model = None
@@ -32,44 +47,128 @@ class EmbeddingModel:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+            print(f"Loading embedding model: {EMBEDDING_MODEL_NAME}")
+            cls._model = SentenceTransformer(EMBEDDING_MODEL_NAME, trust_remote_code=True)
+            print(f"Embedding model loaded! Using dimension: {MATRYOSHKA_DIM}")
         return cls._instance
     
-    def encode(self, texts: List[str]) -> List[List[float]]:
+    def _apply_matryoshka(self, embeddings: np.ndarray) -> np.ndarray:
         """
-        Generate embeddings for a list of texts.
+        Apply Matryoshka dimension reduction with proper normalization.
+        
+        Args:
+            embeddings: Full-dimension embeddings
+            
+        Returns:
+            Reduced dimension embeddings
+        """
+        # Convert to tensor for processing
+        tensor = torch.from_numpy(embeddings).float()
+        
+        # Apply layer normalization
+        tensor = F.layer_norm(tensor, normalized_shape=(tensor.shape[1],))
+        
+        # Truncate to Matryoshka dimension
+        tensor = tensor[:, :MATRYOSHKA_DIM]
+        
+        # L2 normalize
+        tensor = F.normalize(tensor, p=2, dim=1)
+        
+        return tensor.numpy()
+    
+    def encode(self, texts: List[str], is_query: bool = False) -> List[List[float]]:
+        """
+        Generate embeddings for a list of texts with task-specific prefixes.
         
         Args:
             texts: List of text strings to encode
+            is_query: If True, use query prefix; else use document prefix
             
         Returns:
             List of embedding vectors
         """
-        embeddings = self._model.encode(texts, convert_to_numpy=True)
-        return embeddings.tolist()
+        # Add task-specific prefix for nomic-embed
+        prefix = EMBEDDING_PREFIX_QUERY if is_query else EMBEDDING_PREFIX_DOCUMENT
+        prefixed_texts = [prefix + text for text in texts]
+        
+        # Generate embeddings
+        embeddings = self._model.encode(prefixed_texts, convert_to_numpy=True)
+        
+        # Apply Matryoshka dimension reduction
+        reduced_embeddings = self._apply_matryoshka(embeddings)
+        
+        return reduced_embeddings.tolist()
     
-    def encode_single(self, text: str) -> List[float]:
+    def encode_single(self, text: str, is_query: bool = False) -> List[float]:
         """
         Generate embedding for a single text.
         
         Args:
             text: Text string to encode
+            is_query: If True, use query prefix; else use document prefix
             
         Returns:
             Embedding vector as a list of floats
         """
-        embedding = self._model.encode([text], convert_to_numpy=True)
-        return embedding[0].tolist()
+        result = self.encode([text], is_query=is_query)
+        return result[0]
+    
+    def encode_for_similarity(self, texts: List[str]) -> np.ndarray:
+        """
+        Encode texts for semantic similarity comparison (used in semantic chunking).
+        Uses clustering prefix for better sentence-level similarity.
+        
+        Args:
+            texts: List of sentences to compare
+            
+        Returns:
+            Numpy array of embeddings
+        """
+        prefixed_texts = ["clustering: " + text for text in texts]
+        embeddings = self._model.encode(prefixed_texts, convert_to_numpy=True)
+        return self._apply_matryoshka(embeddings)
 
 
 # Global embedding model instance
 embedding_model = EmbeddingModel()
 
 
-def chunk_text(text: str) -> List[Dict[str, Any]]:
+def is_metadata_chunk(text: str) -> bool:
     """
-    Split text into chunks using LangChain's RecursiveCharacterTextSplitter.
-    Optimized for policy documents with proper overlap for context.
+    Check if a chunk appears to be metadata/header content.
+    
+    Args:
+        text: Chunk content to check
+        
+    Returns:
+        True if chunk appears to be metadata
+    """
+    if not FILTER_METADATA_CHUNKS:
+        return False
+    
+    text_lower = text.lower()
+    
+    # Check for metadata keywords
+    for keyword in METADATA_KEYWORDS:
+        if keyword in text_lower:
+            return True
+    
+    # Check for very short chunks (likely headers)
+    if len(text.strip()) < 100:
+        return True
+    
+    # Check for excessive special characters (likely tables/formatting)
+    special_ratio = sum(1 for c in text if c in '|_-=[]{}()<>') / max(len(text), 1)
+    if special_ratio > 0.15:
+        return True
+    
+    return False
+
+
+def semantic_chunk_text(text: str) -> List[Dict[str, Any]]:
+    """
+    Split text using semantic chunking - splits on meaning boundaries.
+    Uses embedding similarity to detect topic changes.
     
     Args:
         text: Full document text
@@ -77,22 +176,101 @@ def chunk_text(text: str) -> List[Dict[str, Any]]:
     Returns:
         List of chunk dictionaries with content and metadata
     """
+    # Split into sentences first
+    import re
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    
+    if len(sentences) < 3:
+        # Too few sentences, use fallback
+        return fallback_chunk_text(text)
+    
+    try:
+        # Get embeddings for all sentences
+        embeddings = embedding_model.encode_for_similarity(sentences)
+        
+        # Calculate similarity between consecutive sentences
+        similarities = []
+        for i in range(len(embeddings) - 1):
+            sim = np.dot(embeddings[i], embeddings[i + 1])
+            similarities.append(sim)
+        
+        # Find breakpoints where similarity drops significantly
+        breakpoints = [0]  # Start of first chunk
+        threshold = SEMANTIC_CHUNK_BREAKPOINT_THRESHOLD
+        
+        for i, sim in enumerate(similarities):
+            if sim < threshold:
+                breakpoints.append(i + 1)
+        
+        breakpoints.append(len(sentences))  # End of last chunk
+        
+        # Create chunks from breakpoints
+        chunks = []
+        current_position = 0
+        
+        for i in range(len(breakpoints) - 1):
+            start_idx = breakpoints[i]
+            end_idx = breakpoints[i + 1]
+            
+            chunk_sentences = sentences[start_idx:end_idx]
+            chunk_content = ' '.join(chunk_sentences)
+            
+            # Skip if chunk is too small
+            if len(chunk_content) < 50:
+                continue
+            
+            # Find position in original text
+            start_char = text.find(chunk_sentences[0], current_position)
+            if start_char == -1:
+                start_char = current_position
+            
+            end_char = start_char + len(chunk_content)
+            
+            chunks.append({
+                "content": chunk_content,
+                "chunk_index": len(chunks),
+                "start_char": start_char,
+                "end_char": end_char,
+                "is_metadata": is_metadata_chunk(chunk_content)
+            })
+            
+            current_position = end_char
+        
+        # If semantic chunking produced too few chunks, use fallback
+        if len(chunks) < 2:
+            return fallback_chunk_text(text)
+        
+        return chunks
+        
+    except Exception as e:
+        print(f"Semantic chunking failed, using fallback: {e}")
+        return fallback_chunk_text(text)
+
+
+def fallback_chunk_text(text: str) -> List[Dict[str, Any]]:
+    """
+    Fallback to character-based chunking when semantic chunking fails.
+    
+    Args:
+        text: Full document text
+        
+    Returns:
+        List of chunk dictionaries
+    """
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
         length_function=len,
-        separators=["\n\n", "\n", ". ", " ", ""]  # Prioritize paragraph breaks
+        separators=["\n\n", "\n", ". ", " ", ""]
     )
     
-    # Split the text
-    chunks = text_splitter.split_text(text)
+    chunks_text = text_splitter.split_text(text)
     
-    # Add metadata to each chunk
     chunk_data = []
     current_position = 0
     
-    for idx, chunk_content in enumerate(chunks):
-        # Find the start position of this chunk in the original text
+    for idx, chunk_content in enumerate(chunks_text):
         start_char = text.find(chunk_content, current_position)
         if start_char == -1:
             start_char = current_position
@@ -102,18 +280,35 @@ def chunk_text(text: str) -> List[Dict[str, Any]]:
             "content": chunk_content,
             "chunk_index": idx,
             "start_char": start_char,
-            "end_char": end_char
+            "end_char": end_char,
+            "is_metadata": is_metadata_chunk(chunk_content)
         })
         
-        # Move position forward, accounting for overlap
         current_position = max(start_char + 1, current_position)
     
     return chunk_data
 
 
+def chunk_text(text: str) -> List[Dict[str, Any]]:
+    """
+    Split text into chunks using semantic or character-based chunking.
+    Optimized for policy documents with proper overlap for context.
+    
+    Args:
+        text: Full document text
+        
+    Returns:
+        List of chunk dictionaries with content and metadata
+    """
+    if ENABLE_SEMANTIC_CHUNKING:
+        return semantic_chunk_text(text)
+    else:
+        return fallback_chunk_text(text)
+
+
 def generate_embeddings(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Generate embeddings for each chunk.
+    Generate embeddings for each chunk using document prefix.
     
     Args:
         chunks: List of chunk dictionaries
@@ -124,8 +319,8 @@ def generate_embeddings(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     # Extract content for batch encoding
     texts = [chunk["content"] for chunk in chunks]
     
-    # Generate embeddings in batch for efficiency
-    embeddings = embedding_model.encode(texts)
+    # Generate embeddings in batch with document prefix
+    embeddings = embedding_model.encode(texts, is_query=False)
     
     # Add embeddings to chunks
     for chunk, embedding in zip(chunks, embeddings):

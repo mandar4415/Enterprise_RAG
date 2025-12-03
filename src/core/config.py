@@ -33,10 +33,27 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # =============================================================================
 # EMBEDDING MODEL CONFIGURATION
 # =============================================================================
-# Using sentence-transformers for local embeddings (free)
-# all-MiniLM-L6-v2: 384 dimensions, fast, good quality for general use
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-EMBEDDING_DIMENSION = 384  # Dimension size for all-MiniLM-L6-v2
+# Using nomic-embed-text-v1.5 with Matryoshka support
+# Supports dimension reduction: 768, 512, 256, 128, 64
+# Better quality than all-MiniLM-L6-v2 with task-specific prefixes
+EMBEDDING_MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5"
+EMBEDDING_DIMENSION = 512  # Balanced: good performance, reasonable storage
+MATRYOSHKA_DIM = 512  # Can reduce to 256/128 for faster search with minimal quality loss
+
+# Task prefixes for nomic-embed (improves retrieval quality)
+EMBEDDING_PREFIX_DOCUMENT = "search_document: "  # For document chunks
+EMBEDDING_PREFIX_QUERY = "search_query: "  # For user queries
+
+# =============================================================================
+# SEMANTIC CHUNKING CONFIGURATION
+# =============================================================================
+# Enable semantic chunking (splits on meaning boundaries vs fixed character counts)
+ENABLE_SEMANTIC_CHUNKING = True
+SEMANTIC_CHUNK_BREAKPOINT_THRESHOLD = 0.3  # Similarity drop threshold for splitting
+
+# Fallback to character-based if semantic fails
+FALLBACK_CHUNK_SIZE = 1000
+FALLBACK_CHUNK_OVERLAP = 200
 
 # =============================================================================
 # LLM CONFIGURATION  
@@ -48,9 +65,17 @@ LLM_TEMPERATURE = 0.0  # Low temperature for deterministic responses
 # =============================================================================
 # CHUNKING CONFIGURATION
 # =============================================================================
-# Optimized settings for policy documents
+# Optimized settings for policy documents (used as fallback if semantic chunking fails)
 CHUNK_SIZE = 1000  # Characters per chunk
 CHUNK_OVERLAP = 200  # Overlap between chunks for context continuity
+
+# Metadata detection - filter out header/metadata chunks during retrieval
+FILTER_METADATA_CHUNKS = True
+METADATA_KEYWORDS = [
+    "table of contents", "toc", "nodis library", "effective date",
+    "expiration date", "compliance is mandatory", "page", "index",
+    "appendix", "revision history", "document control"
+]
 
 # =============================================================================
 # RETRIEVAL CONFIGURATION
@@ -69,7 +94,8 @@ TOP_K_AFTER_RERANK = 5
 SIMILARITY_THRESHOLD = 0.3
 
 # Minimum similarity score to be considered relevant (stricter filter)
-MIN_RELEVANCE_SCORE = 0.4
+# Note: Cross-encoder scores are typically in range -10 to +10, with higher being more relevant
+MIN_RELEVANCE_SCORE = 5.0  # Increased to filter chunks with scores below 5.0
 
 # Enable re-ranking with cross-encoder
 ENABLE_RERANKING = True

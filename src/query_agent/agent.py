@@ -21,7 +21,9 @@ from src.core.config import (
     TOP_K_RERANK_CANDIDATES,
     TOP_K_AFTER_RERANK,
     SIMILARITY_THRESHOLD,
-    ENABLE_RERANKING
+    ENABLE_RERANKING,
+    FILTER_METADATA_CHUNKS,
+    METADATA_KEYWORDS
 )
 from src.db.models import DocumentChunk, Document
 from src.db.connection import get_db_context
@@ -117,6 +119,33 @@ def get_llm():
 # RETRIEVAL FUNCTIONS
 # =============================================================================
 
+def is_metadata_content(text: str) -> bool:
+    """
+    Check if chunk content appears to be metadata/header.
+    Used to filter out low-value chunks during retrieval.
+    """
+    if not FILTER_METADATA_CHUNKS:
+        return False
+    
+    text_lower = text.lower()
+    
+    # Check for metadata keywords
+    for keyword in METADATA_KEYWORDS:
+        if keyword in text_lower:
+            return True
+    
+    # Check for very short content (likely headers)
+    if len(text.strip()) < 100:
+        return True
+    
+    # Check for excessive special characters
+    special_ratio = sum(1 for c in text if c in '|_-=[]{}()<>') / max(len(text), 1)
+    if special_ratio > 0.15:
+        return True
+    
+    return False
+
+
 def retrieve_similar_chunks(
     query: str,
     top_k: int = TOP_K_RESULTS,
@@ -138,8 +167,8 @@ def retrieve_similar_chunks(
     Returns:
         List of chunk dictionaries with content and metadata
     """
-    # Generate query embedding
-    query_embedding = embedding_model.encode_single(query)
+    # Generate query embedding with query prefix (nomic-embed requires this)
+    query_embedding = embedding_model.encode_single(query, is_query=True)
     
     # If re-ranking is enabled, retrieve more candidates initially
     initial_top_k = TOP_K_RERANK_CANDIDATES if use_reranking else top_k
@@ -164,6 +193,10 @@ def retrieve_similar_chunks(
             
             # Apply similarity threshold filter
             if similarity < SIMILARITY_THRESHOLD:
+                continue
+            
+            # Filter out metadata chunks if enabled
+            if is_metadata_content(chunk.content):
                 continue
                 
             chunks.append({
@@ -377,8 +410,15 @@ CRITICAL RULES - YOU MUST FOLLOW THESE:
 3. DO NOT make inferences or assumptions beyond what the context states
 4. If the context doesn't contain enough information, clearly say "Based on the provided documents, I don't have information about [topic]"
 5. Always cite which source document(s) you're using with (Source X) format
-6. Be concise and professional
+6. Be thorough and comprehensive - include ALL relevant details from the context
 7. If you're uncertain about something, express that uncertainty
+
+COMPLETENESS REQUIREMENTS:
+- Include ALL specific requirements, criteria, or conditions mentioned in the context
+- List ALL numbered items, bullet points, or enumerated criteria if present
+- Mention ALL relevant dates, deadlines, or timeframes if applicable
+- Include ALL responsible parties or roles mentioned
+- Provide ALL exceptions or special cases noted in the documents
 
 IMPORTANT: Hallucinating information not in the context is a serious error. When in doubt, say you don't have that information."""
     
@@ -407,8 +447,11 @@ REMEMBER:
 - Do not add any information from your training data  
 - If information is missing, say so clearly
 - Cite sources using (Source X) format
+- Be THOROUGH: Include ALL specific requirements, criteria, conditions, and details from the context
+- List ALL numbered items or bullet points if present in the context
+- Include ALL dates, deadlines, responsible parties, and exceptions mentioned
 
-Provide a comprehensive but concise answer."""
+Provide a comprehensive and detailed answer that covers ALL relevant information from the documents."""
     
     try:
         messages = [
