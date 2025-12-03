@@ -14,3 +14,7 @@ sentence-transformers
 pgvector
 python-multipart
 pydantic
+# Evaluation frameworks
+ragas
+deepeval
+datasets

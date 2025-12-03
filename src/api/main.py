@@ -26,6 +26,12 @@ from src.ingestion.pipeline import (
 )
 from src.query_agent.agent import query_policy_documents
 from src.utils.helpers import validate_file_extension, get_file_type
+from src.evaluation.metrics import (
+    RAGEvaluator,
+    EvaluationSample,
+    evaluate_single_query,
+    get_evaluation_summary
+)
 
 
 # =============================================================================
@@ -98,6 +104,86 @@ class ErrorResponse(BaseModel):
     """Response model for errors."""
     detail: str
     status: str = "error"
+
+
+# =============================================================================
+# EVALUATION MODELS
+# =============================================================================
+
+class EvaluationRequest(BaseModel):
+    """Request model for evaluating a RAG query result."""
+    query: str = Field(..., description="The original question")
+    answer: str = Field(..., description="The generated answer")
+    contexts: List[str] = Field(..., description="The retrieved context chunks")
+    ground_truth: Optional[str] = Field(None, description="Optional expected answer for recall calculation")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "query": "What is NASA's policy on data management?",
+                "answer": "NASA requires all data to be...",
+                "contexts": ["Context chunk 1...", "Context chunk 2..."],
+                "ground_truth": None
+            }
+        }
+
+
+class EvaluationScores(BaseModel):
+    """Individual evaluation scores."""
+    faithfulness: float = Field(..., description="Does answer stick to context? (0-1)")
+    answer_relevancy: float = Field(..., description="Does answer address question? (0-1)")
+    context_precision: float = Field(..., description="How relevant is retrieved context? (0-1)")
+    context_utilization: float = Field(..., description="How much context was used? (0-1)")
+    completeness: float = Field(..., description="Is the answer complete? (0-1)")
+    overall: float = Field(..., description="Weighted overall score (0-1)")
+
+
+class EvaluationFeedback(BaseModel):
+    """Detailed evaluation feedback."""
+    faithfulness: str
+    answer_relevancy: str
+    context_precision: str
+    context_utilization: str
+    completeness: str
+    hallucinations_detected: Optional[List[str]] = None
+    missed_aspects: Optional[List[str]] = None
+    irrelevant_chunks: Optional[List[int]] = None
+
+
+class EvaluationResponse(BaseModel):
+    """Response model for evaluation results."""
+    query: str
+    scores: EvaluationScores
+    feedback: EvaluationFeedback
+    summary: str
+    timestamp: str
+    status: str = "success"
+
+
+class QueryAndEvaluateRequest(BaseModel):
+    """Request model for combined query and evaluation."""
+    query: str = Field(..., description="The question to ask about policy documents")
+    document_ids: Optional[List[int]] = Field(None, description="Filter by specific document IDs")
+    ground_truth: Optional[str] = Field(None, description="Optional expected answer for evaluation")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "query": "What is NASA's policy on cybersecurity?",
+                "document_ids": [1, 2],
+                "ground_truth": None
+            }
+        }
+
+
+class QueryAndEvaluateResponse(BaseModel):
+    """Response model for combined query and evaluation."""
+    query: str
+    answer: str
+    sources: List[dict]
+    evaluation: EvaluationScores
+    summary: str
+    status: str
 
 
 # =============================================================================
@@ -409,6 +495,178 @@ async def remove_document(document_id: int):
 
 
 # =============================================================================
+# RAG EVALUATION ENDPOINTS
+# =============================================================================
+
+@app.post(
+    "/evaluate",
+    response_model=EvaluationResponse,
+    tags=["Evaluation"],
+    summary="Evaluate a RAG query result",
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid request"},
+        500: {"model": ErrorResponse, "description": "Evaluation failed"}
+    }
+)
+async def evaluate_rag_result(request: EvaluationRequest):
+    """
+    Evaluate the quality of a RAG query result.
+    
+    Metrics evaluated:
+    - **Faithfulness**: Does the answer stick to the context? (detects hallucinations)
+    - **Answer Relevancy**: Does the answer address the question?
+    - **Context Precision**: How relevant was the retrieved context?
+    - **Context Utilization**: How much of the context was used?
+    - **Completeness**: Is the answer complete?
+    
+    Scores range from 0-1, higher is better.
+    An overall weighted score is also provided.
+    """
+    if not request.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+    if not request.answer.strip():
+        raise HTTPException(status_code=400, detail="Answer cannot be empty")
+    if not request.contexts:
+        raise HTTPException(status_code=400, detail="At least one context chunk is required")
+    
+    try:
+        # Run evaluation
+        result = evaluate_single_query(
+            query=request.query,
+            contexts=request.contexts,
+            answer=request.answer,
+            ground_truth=request.ground_truth
+        )
+        
+        # Generate summary
+        summary = get_evaluation_summary(result)
+        
+        # Build response
+        scores = EvaluationScores(
+            faithfulness=result["scores"]["faithfulness"],
+            answer_relevancy=result["scores"]["answer_relevancy"],
+            context_precision=result["scores"]["context_precision"],
+            context_utilization=result["scores"]["context_utilization"],
+            completeness=result["scores"]["completeness"],
+            overall=result["scores"]["overall"]
+        )
+        
+        feedback = EvaluationFeedback(
+            faithfulness=result["feedback"].get("faithfulness", ""),
+            answer_relevancy=result["feedback"].get("answer_relevancy", ""),
+            context_precision=result["feedback"].get("context_precision", ""),
+            context_utilization=result["feedback"].get("context_utilization", ""),
+            completeness=result["feedback"].get("completeness", ""),
+            hallucinations_detected=result["feedback"].get("hallucinations_detected", []),
+            missed_aspects=result["feedback"].get("missed_aspects", []),
+            irrelevant_chunks=result["feedback"].get("irrelevant_chunks", [])
+        )
+        
+        return EvaluationResponse(
+            query=result["query"],
+            scores=scores,
+            feedback=feedback,
+            summary=summary,
+            timestamp=result["timestamp"],
+            status="success"
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Evaluation failed: {str(e)}"
+        )
+
+
+@app.post(
+    "/query-and-evaluate",
+    response_model=QueryAndEvaluateResponse,
+    tags=["Evaluation"],
+    summary="Query documents and evaluate the result",
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid request"},
+        500: {"model": ErrorResponse, "description": "Query or evaluation failed"}
+    }
+)
+async def query_and_evaluate(request: QueryAndEvaluateRequest):
+    """
+    Query policy documents AND automatically evaluate the RAG result.
+    
+    This is a convenience endpoint that:
+    1. Runs your query through the RAG pipeline
+    2. Automatically evaluates the quality of the result
+    3. Returns both the answer and evaluation metrics
+    
+    Use this for:
+    - Testing the quality of your RAG system
+    - A/B testing different configurations
+    - Monitoring production quality
+    """
+    if not request.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
+    
+    try:
+        # Step 1: Run the query
+        query_result = query_policy_documents(
+            query=request.query,
+            verbose=False,
+            document_ids=request.document_ids
+        )
+        
+        # Extract contexts from sources
+        # The sources dict has "preview" field containing the text content
+        contexts = [
+            source.get("preview", "") or source.get("content", "")
+            for source in query_result.get("sources", [])
+            if source.get("preview") or source.get("content")
+        ]
+        
+        if not contexts:
+            raise HTTPException(
+                status_code=400,
+                detail="No context retrieved for evaluation"
+            )
+        
+        # Step 2: Evaluate the result
+        eval_result = evaluate_single_query(
+            query=request.query,
+            contexts=contexts,
+            answer=query_result["answer"],
+            ground_truth=request.ground_truth
+        )
+        
+        # Build evaluation scores
+        scores = EvaluationScores(
+            faithfulness=eval_result["scores"]["faithfulness"],
+            answer_relevancy=eval_result["scores"]["answer_relevancy"],
+            context_precision=eval_result["scores"]["context_precision"],
+            context_utilization=eval_result["scores"]["context_utilization"],
+            completeness=eval_result["scores"]["completeness"],
+            overall=eval_result["scores"]["overall"]
+        )
+        
+        # Generate summary
+        summary = get_evaluation_summary(eval_result)
+        
+        return QueryAndEvaluateResponse(
+            query=query_result["query"],
+            answer=query_result["answer"],
+            sources=query_result["sources"],
+            evaluation=scores,
+            summary=summary,
+            status="success"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Query and evaluation failed: {str(e)}"
+        )
+
+
+# =============================================================================
 # ROOT ENDPOINT
 # =============================================================================
 
@@ -424,6 +682,8 @@ async def root():
             "upload": "/upload",
             "query": "/query",
             "documents": "/documents",
+            "evaluate": "/evaluate",
+            "query-and-evaluate": "/query-and-evaluate",
             "docs": "/docs"
         }
     }
