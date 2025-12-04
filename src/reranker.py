@@ -1,12 +1,23 @@
 """
 Cross-encoder reranker for Enterprise RAG - Simplified Edition
 CRITICAL: This is essential for the 1.00 score - do not modify
-~50 lines
 """
 from typing import List, Dict, Any
 from sentence_transformers import CrossEncoder
 
 from src.config import RERANKER_MODEL, TOP_K_FINAL, MIN_RERANK_SCORE
+
+
+def normalize_score(raw_score: float, min_score: float = -10.0, max_score: float = 10.0) -> float:
+    """
+    Normalize raw cross-encoder score to 0-1 range for display.
+    Uses min-max scaling with typical score range.
+    """
+    # Clamp to expected range
+    clamped = max(min_score, min(max_score, raw_score))
+    # Scale to 0-1
+    normalized = (clamped - min_score) / (max_score - min_score)
+    return round(normalized, 3)
 
 
 class Reranker:
@@ -39,17 +50,20 @@ class Reranker:
         
         # Score all query-chunk pairs
         pairs = [(query, c['content']) for c in chunks]
-        scores = self._model.predict(pairs)
+        raw_scores = self._model.predict(pairs)
         
         # Add scores to chunks
-        for chunk, score in zip(chunks, scores):
-            chunk['rerank_score'] = float(score)
+        # raw_score: original logit (-10 to +10 range) - used for filtering
+        # rerank_score: normalized to 0-1 for display
+        for chunk, raw_score in zip(chunks, raw_scores):
+            chunk['raw_score'] = float(raw_score)
+            chunk['rerank_score'] = normalize_score(float(raw_score))
         
-        # Sort by score (descending) and STRICTLY filter by threshold
-        ranked = sorted(chunks, key=lambda x: x['rerank_score'], reverse=True)
-        filtered = [c for c in ranked if c['rerank_score'] >= MIN_RERANK_SCORE]
+        # Sort by raw score (descending) and filter by threshold
+        ranked = sorted(chunks, key=lambda x: x['raw_score'], reverse=True)
+        filtered = [c for c in ranked if c['raw_score'] >= MIN_RERANK_SCORE]
         
-        # Only return chunks that pass the threshold - no fallback to low-quality chunks
+        # Only return chunks that pass the threshold
         return filtered[:top_k]
 
 

@@ -30,10 +30,10 @@ EMBEDDING_PREFIX_QUERY = "search_query: "
 # =============================================================================
 # RETRIEVAL & RERANKING (Critical for quality)
 # =============================================================================
-TOP_K_CANDIDATES = 15  # Initial retrieval
-TOP_K_FINAL = 5  # After reranking
+TOP_K_CANDIDATES = 20  # Initial retrieval (increased for multi-topic queries)
+TOP_K_FINAL = 7  # After reranking (increased to cover multiple topics)
 SIMILARITY_THRESHOLD = 0.3
-MIN_RERANK_SCORE = -5.0  # Filter only very irrelevant chunks (scores typically range -10 to +10)
+MIN_RERANK_SCORE = -10.0  # Raw logit threshold (scores range -10 to +10, -10 allows all reasonable chunks)
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # =============================================================================
