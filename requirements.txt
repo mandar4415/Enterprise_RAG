@@ -1,23 +1,29 @@
+# Enterprise RAG v2 - Simplified Dependencies
+# Core API
 fastapi
 uvicorn[standard]
 python-dotenv
-psycopg2-binary
-sqlalchemy
-langchain
-langchain-core
-langchain-community
-langchain-google-genai
-langgraph
-pypdf
-python-docx
-sentence-transformers
-pgvector
 python-multipart
 pydantic
-# Nomic embed requires einops and torch
+
+# Database
+psycopg2-binary
+sqlalchemy
+pgvector
+
+# LLM
+langchain-core
+langchain-google-genai
+langchain-text-splitters
+
+# Embeddings & Reranking (Critical for quality)
+sentence-transformers
 einops
 torch
-# Evaluation frameworks
-ragas
-deepeval
-datasets
+
+# Document Processing
+pypdf
+python-docx
+
+# Note: Removed langgraph, ragas, deepeval, datasets
+# These are no longer needed in the simplified version
