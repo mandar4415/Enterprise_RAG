@@ -165,7 +165,7 @@ def is_metadata(text: str) -> bool:
 # =============================================================================
 
 def ingest_document(file_path: str, filename: str, file_size: int, 
-                    title: str = None, description: str = None) -> Dict[str, Any]:
+                    title: str = None, description: str = None, user_id: int = None) -> Dict[str, Any]:
     """Ingest a document: extract → chunk → embed → store."""
     # Extract and clean
     text = clean_text(extract_text(file_path))
@@ -183,7 +183,8 @@ def ingest_document(file_path: str, filename: str, file_size: int,
     with get_db() as db:
         doc = Document(
             filename=filename, file_type=filename.split('.')[-1],
-            file_size=file_size, title=title or filename, description=description
+            file_size=file_size, title=title or filename, description=description,
+            user_id=user_id  # Associate with user
         )
         db.add(doc)
         db.flush()
@@ -202,13 +203,18 @@ def ingest_document(file_path: str, filename: str, file_size: int,
 # RETRIEVAL - With Multi-Query Support
 # =============================================================================
 
-def retrieve_single(query: str, document_ids: List[int] = None, top_k: int = TOP_K_CANDIDATES) -> List[Dict[str, Any]]:
+def retrieve_single(query: str, document_ids: List[int] = None, top_k: int = TOP_K_CANDIDATES, user_id: int = None) -> List[Dict[str, Any]]:
     """Retrieve chunks for a single query (internal use)."""
     query_emb = embedder.encode_single(query, is_query=True)
     
     with get_db() as db:
         # Vector search
         q = db.query(Chunk, Chunk.embedding.cosine_distance(query_emb).label('distance')).join(Document)
+        
+        # Filter by user_id (user can only search their own documents)
+        if user_id:
+            q = q.filter(Document.user_id == user_id)
+        
         if document_ids:
             q = q.filter(Chunk.document_id.in_(document_ids))
         results = q.order_by('distance').limit(top_k).all()
@@ -230,7 +236,7 @@ def retrieve_single(query: str, document_ids: List[int] = None, top_k: int = TOP
 
 
 def retrieve_with_queries(queries: List[str], original_query: str, document_ids: List[int] = None, 
-                          top_k: int = TOP_K_FINAL) -> List[Dict[str, Any]]:
+                          top_k: int = TOP_K_FINAL, user_id: int = None) -> List[Dict[str, Any]]:
     """
     Retrieve and rerank chunks using pre-expanded queries.
     
@@ -239,11 +245,12 @@ def retrieve_with_queries(queries: List[str], original_query: str, document_ids:
         original_query: Original user query (used for reranking)
         document_ids: Optional document filter
         top_k: Number of final results
+        user_id: User ID for filtering (user can only search their own documents)
     """
     # Retrieve chunks for each expanded query
     all_chunks = {}  # Use dict to dedupe by chunk ID
     for q in queries:
-        chunks = retrieve_single(q, document_ids, TOP_K_CANDIDATES)
+        chunks = retrieve_single(q, document_ids, TOP_K_CANDIDATES, user_id)
         for c in chunks:
             # Keep best similarity score if duplicate
             if c["id"] not in all_chunks or c["similarity_score"] > all_chunks[c["id"]]["similarity_score"]:
@@ -317,7 +324,7 @@ def generate(query: str, chunks: List[Dict[str, Any]]) -> str:
 # MAIN QUERY FUNCTION
 # =============================================================================
 
-def query(q: str, document_ids: List[int] = None, use_expansion: bool = True) -> Dict[str, Any]:
+def query(q: str, document_ids: List[int] = None, user_id: int = None, use_expansion: bool = True) -> Dict[str, Any]:
     """
     Main RAG query function.
     Flow: expand → retrieve → rerank → generate
@@ -325,14 +332,15 @@ def query(q: str, document_ids: List[int] = None, use_expansion: bool = True) ->
     Args:
         q: User's query
         document_ids: Optional list of document IDs to search
+        user_id: User ID for filtering (user can only search their own documents)
         use_expansion: Whether to use query expansion (default: True)
     """
     try:
         # Expand query ONCE here (not inside retrieve to avoid duplicate LLM calls)
         expanded_queries = expand_query(q) if use_expansion else [q]
         
-        # Retrieve with pre-expanded queries (pass use_expansion=False since we already expanded)
-        chunks = retrieve_with_queries(expanded_queries, q, document_ids)
+        # Retrieve with pre-expanded queries (pass user_id for filtering)
+        chunks = retrieve_with_queries(expanded_queries, q, document_ids, TOP_K_FINAL, user_id)
         answer = generate(q, chunks)
         
         return {
@@ -353,37 +361,49 @@ def query(q: str, document_ids: List[int] = None, use_expansion: bool = True) ->
 # DOCUMENT MANAGEMENT
 # =============================================================================
 
-def list_documents() -> List[Dict[str, Any]]:
-    """List all documents."""
+def list_documents(user_id: int = None) -> List[Dict[str, Any]]:
+    """List documents (filtered by user_id if provided)."""
     with get_db() as db:
-        docs = db.query(Document).all()
+        q = db.query(Document)
+        if user_id:
+            q = q.filter(Document.user_id == user_id)
+        docs = q.all()
         return [{"id": d.id, "filename": d.filename, "title": d.title,
                  "file_type": d.file_type, "file_size": d.file_size,
                  "num_chunks": len(d.chunks), "created_at": d.created_at.isoformat()} for d in docs]
 
-def get_document(doc_id: int) -> Optional[Dict[str, Any]]:
-    """Get document by ID."""
+def get_document(doc_id: int, user_id: int = None) -> Optional[Dict[str, Any]]:
+    """Get document by ID (user can only access their own documents)."""
     with get_db() as db:
-        d = db.query(Document).filter(Document.id == doc_id).first()
+        q = db.query(Document).filter(Document.id == doc_id)
+        if user_id:
+            q = q.filter(Document.user_id == user_id)
+        d = q.first()
         if not d:
             return None
         return {"id": d.id, "filename": d.filename, "title": d.title, "description": d.description,
                 "file_type": d.file_type, "file_size": d.file_size, "num_chunks": len(d.chunks),
                 "created_at": d.created_at.isoformat()}
 
-def delete_document(doc_id: int) -> bool:
-    """Delete document by ID."""
+def delete_document(doc_id: int, user_id: int = None) -> bool:
+    """Delete document by ID (user can only delete their own documents)."""
     with get_db() as db:
-        d = db.query(Document).filter(Document.id == doc_id).first()
+        q = db.query(Document).filter(Document.id == doc_id)
+        if user_id:
+            q = q.filter(Document.user_id == user_id)
+        d = q.first()
         if d:
             db.delete(d)
             return True
         return False
 
-def check_duplicate(filename: str, file_size: int) -> Optional[Dict[str, Any]]:
-    """Check if document already exists."""
+def check_duplicate(filename: str, file_size: int, user_id: int = None) -> Optional[Dict[str, Any]]:
+    """Check if document already exists for this user."""
     with get_db() as db:
-        d = db.query(Document).filter(Document.filename == filename, Document.file_size == file_size).first()
+        q = db.query(Document).filter(Document.filename == filename, Document.file_size == file_size)
+        if user_id:
+            q = q.filter(Document.user_id == user_id)
+        d = q.first()
         if d:
             return {"id": d.id, "filename": d.filename, "created_at": d.created_at.isoformat()}
         return None

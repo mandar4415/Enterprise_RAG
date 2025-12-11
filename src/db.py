@@ -71,11 +71,39 @@ def check_db() -> bool:
 
 Base = declarative_base()
 
+class User(Base):
+    """User for authentication."""
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    name = Column(String(255))
+    picture = Column(String(500))  # Profile picture URL from Google
+    google_id = Column(String(255), unique=True, nullable=True, index=True)  # Google sub claim (nullable for email users)
+    auth_provider = Column(String(50), default="email")  # "google" or "email"
+    is_active = Column(Integer, default=1)  # 1 = active, 0 = disabled
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_login = Column(DateTime, default=datetime.utcnow)
+    
+    documents = relationship("Document", back_populates="owner", cascade="all, delete-orphan")
+
+class OTPCode(Base):
+    """OTP codes for email verification."""
+    __tablename__ = "otp_codes"
+    
+    id = Column(Integer, primary_key=True)
+    email = Column(String(255), nullable=False, index=True)
+    code = Column(String(10), nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    is_used = Column(Integer, default=0)  # 0 = unused, 1 = used
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 class Document(Base):
     """Policy document metadata."""
     __tablename__ = "documents"
     
     id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)  # Owner
     filename = Column(String(255), nullable=False)
     file_type = Column(String(50), nullable=False)
     file_size = Column(Integer, nullable=False)
@@ -84,6 +112,7 @@ class Document(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    owner = relationship("User", back_populates="documents")
     chunks = relationship("Chunk", back_populates="document", cascade="all, delete-orphan")
 
 class Chunk(Base):
