@@ -40,7 +40,10 @@ class QueryResponse(BaseModel):
     expanded_queries: Optional[List[str]] = None  # Shows what search queries were used
     answer: str
     sources: List[dict]
-    llm_provider: Optional[str] = None  # Shows which LLM provider was used
+    # Evaluation metrics (computed server-side)
+    answer_relevancy: Optional[float] = None
+    overall: Optional[float] = None
+    summary: Optional[str] = None
     status: str
 
 class DocumentResponse(BaseModel):
@@ -350,7 +353,36 @@ async def query_docs(request: QueryRequest, user: dict = Depends(require_auth)):
         raise HTTPException(400, "Query too long. Max 2000 characters.")
     
     result = query(request.query, request.document_ids, user["id"])
-    return QueryResponse(**result)
+
+    # Prepare base response
+    response_payload = {
+        "query": result.get("query"),
+        "expanded_queries": result.get("expanded_queries"),
+        "answer": result.get("answer"),
+        "sources": result.get("sources", []),
+        "status": result.get("status", "success")
+    }
+
+    # If we retrieved context, run evaluation to compute metrics (same as /evaluate)
+    try:
+        if response_payload["sources"]:
+            contexts = [s.get("preview", "").replace("...", "") for s in response_payload["sources"]]
+            eval_result = evaluate(request.query, response_payload["answer"], contexts)
+            evaluation = eval_result.get("evaluation", {})
+            response_payload["answer_relevancy"] = evaluation.get("answer_relevancy")
+            response_payload["overall"] = evaluation.get("overall")
+            response_payload["summary"] = get_summary(eval_result)
+        else:
+            response_payload["answer_relevancy"] = None
+            response_payload["overall"] = None
+            response_payload["summary"] = None
+    except Exception:
+        # If evaluation fails, don't block the user — return the answer without metrics
+        response_payload["answer_relevancy"] = None
+        response_payload["overall"] = None
+        response_payload["summary"] = None
+
+    return QueryResponse(**response_payload)
 
 
 # =============================================================================
