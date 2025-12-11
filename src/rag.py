@@ -6,9 +6,70 @@ Production-ready with query expansion for complex queries
 from typing import List, Dict, Any, Optional
 import re
 import json
+import hashlib
+from datetime import datetime, timedelta
+from threading import Lock
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from sqlalchemy.orm import Session
+
+
+# =============================================================================
+# QUERY CACHE - Avoid duplicate API calls for same queries
+# =============================================================================
+
+class QueryCache:
+    """
+    Simple TTL-based cache for query results.
+    Caches per user+query to avoid duplicate LLM/embedding calls.
+    """
+    def __init__(self, ttl_minutes: int = 10, max_size: int = 100):
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._lock = Lock()
+        self._ttl = timedelta(minutes=ttl_minutes)
+        self._max_size = max_size
+    
+    def _make_key(self, query: str, user_id: int, document_ids: List[int] = None) -> str:
+        """Create cache key from query params."""
+        doc_str = ",".join(map(str, sorted(document_ids or [])))
+        raw = f"{user_id}:{query.lower().strip()}:{doc_str}"
+        return hashlib.md5(raw.encode()).hexdigest()
+    
+    def get(self, query: str, user_id: int, document_ids: List[int] = None) -> Optional[Dict[str, Any]]:
+        """Get cached result if exists and not expired."""
+        key = self._make_key(query, user_id, document_ids)
+        with self._lock:
+            if key in self._cache:
+                entry = self._cache[key]
+                if datetime.utcnow() < entry["expires_at"]:
+                    entry["result"]["_cached"] = True  # Mark as cached
+                    return entry["result"]
+                else:
+                    del self._cache[key]  # Expired
+        return None
+    
+    def set(self, query: str, user_id: int, result: Dict[str, Any], document_ids: List[int] = None):
+        """Store result in cache."""
+        key = self._make_key(query, user_id, document_ids)
+        with self._lock:
+            # Evict oldest if at capacity
+            if len(self._cache) >= self._max_size:
+                oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k]["expires_at"])
+                del self._cache[oldest_key]
+            
+            self._cache[key] = {
+                "result": result.copy(),
+                "expires_at": datetime.utcnow() + self._ttl
+            }
+    
+    def clear(self):
+        """Clear all cached entries."""
+        with self._lock:
+            self._cache.clear()
+
+
+# Global cache instance (10 minute TTL, max 100 entries)
+_query_cache = QueryCache(ttl_minutes=10, max_size=100)
 
 from src.config import (
     TOP_K_CANDIDATES, TOP_K_FINAL,
@@ -327,7 +388,7 @@ def generate(query: str, chunks: List[Dict[str, Any]]) -> str:
 def query(q: str, document_ids: List[int] = None, user_id: int = None, use_expansion: bool = True) -> Dict[str, Any]:
     """
     Main RAG query function.
-    Flow: expand → retrieve → rerank → generate
+    Flow: check cache → expand → retrieve → rerank → generate → cache result
     
     Args:
         q: User's query
@@ -335,26 +396,53 @@ def query(q: str, document_ids: List[int] = None, user_id: int = None, use_expan
         user_id: User ID for filtering (user can only search their own documents)
         use_expansion: Whether to use query expansion (default: True)
     """
+    # Check cache first (saves LLM + embedding API calls for duplicate queries)
+    if user_id:
+        cached = _query_cache.get(q, user_id, document_ids)
+        if cached:
+            print(f"[Cache HIT] Query: {q[:50]}...")
+            return cached
+    
     try:
         # Expand query ONCE here (not inside retrieve to avoid duplicate LLM calls)
         expanded_queries = expand_query(q) if use_expansion else [q]
-        
+
         # Retrieve with pre-expanded queries (pass user_id for filtering)
         chunks = retrieve_with_queries(expanded_queries, q, document_ids, TOP_K_FINAL, user_id)
         answer = generate(q, chunks)
-        
-        return {
-            "query": q, 
-            "expanded_queries": expanded_queries,  # Show what queries were used
+
+        # Compute overall confidence score from reranked chunks
+        if chunks:
+            # Use the top rerank_score as overall confidence
+            top_score = chunks[0].get("rerank_score", chunks[0].get("similarity_score", 0))
+        else:
+            top_score = 0.0
+
+        # Map score to friendly badge
+        if top_score >= 0.75:
+            confidence_badge = "High Confidence"
+        elif top_score >= 0.5:
+            confidence_badge = "Medium Confidence"
+        elif top_score > 0.0:
+            confidence_badge = "Low Confidence"
+        else:
+            confidence_badge = "No Confident Match"
+
+        result = {
+            "query": q,
             "answer": answer,
-            "sources": [{"document": c["document_title"], "chunk": c["chunk_index"],
-                        "relevance": round(c.get("rerank_score", 0), 3),
-                        "preview": c["content"][:200] + "..."} for c in chunks],
-            "llm_provider": get_provider_name(),  # Show which provider was used
+            "confidence_badge": confidence_badge,
             "status": "success"
         }
+
+        # Cache result for future identical queries
+        if user_id:
+            _query_cache.set(q, user_id, result, document_ids)
+            print(f"[Cache SET] Query: {q[:50]}...")
+
+        return result
     except Exception as e:
-        return {"query": q, "answer": f"Error: {str(e)}", "sources": [], "status": "error"}
+        return {"query": q, "answer": f"Error: {str(e)}", "confidence_badge": "Error", "status": "error"}
 
 
 # =============================================================================
