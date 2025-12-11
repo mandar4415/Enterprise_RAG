@@ -1,4 +1,5 @@
 # Virtual environment
+# Virtual environment
 venv/
 .env
 
@@ -20,3 +21,6 @@ __pycache__/
 # OS system files
 .DS_Store
 Thumbs.db
+
+# Uploads (user uploaded files)
+uploads/
