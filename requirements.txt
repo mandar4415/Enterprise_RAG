@@ -11,9 +11,10 @@ psycopg2-binary
 sqlalchemy
 pgvector
 
-# LLM
+# LLM Providers (with fallback support)
 langchain-core
 langchain-google-genai
+langchain-groq
 langchain-text-splitters
 
 # Embeddings & Reranking (Critical for quality)

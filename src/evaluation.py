@@ -1,14 +1,14 @@
 """
 RAG Evaluation for Enterprise RAG - Simplified Edition
 2 metrics only: Faithfulness + Answer Quality (~100 lines)
-Replaces 527-line evaluation with 5 LLM calls
+Uses unified LLM provider with automatic fallback
 """
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel, Field
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
 
-from src.config import LLM_MODEL
+from src.llm import invoke_with_retry, get_provider_name
 
 
 class FaithfulnessResult(BaseModel):
@@ -53,8 +53,8 @@ INSTRUCTIONS:
 Be GENEROUS - paraphrases and summaries of context are supported."""
 
     try:
-        llm = ChatGoogleGenerativeAI(model=LLM_MODEL, temperature=0)
-        result = llm.with_structured_output(FaithfulnessResult).invoke(prompt)
+        messages = [HumanMessage(content=prompt)]
+        result = invoke_with_retry(messages, temperature=0.0, structured_output=FaithfulnessResult)
         return result
     except Exception as e:
         return FaithfulnessResult(score=0.5, reasoning=f"Error: {str(e)[:50]}")
@@ -79,8 +79,8 @@ INSTRUCTIONS:
 5. Score 1.0 = fully addresses all aspects, 0.0 = completely irrelevant"""
 
     try:
-        llm = ChatGoogleGenerativeAI(model=LLM_MODEL, temperature=0)
-        result = llm.with_structured_output(AnswerQualityResult).invoke(prompt)
+        messages = [HumanMessage(content=prompt)]
+        result = invoke_with_retry(messages, temperature=0.0, structured_output=AnswerQualityResult)
         return result
     except Exception as e:
         return AnswerQualityResult(score=0.5, reasoning=f"Error: {str(e)[:50]}")
@@ -113,6 +113,7 @@ def evaluate(query: str, answer: str, contexts: List[str]) -> Dict[str, Any]:
             "hallucinations": faithfulness.unsupported_claims,
             "missed_aspects": quality.missed_aspects
         },
+        "llm_provider": get_provider_name(),
         "timestamp": datetime.utcnow().isoformat()
     }
 

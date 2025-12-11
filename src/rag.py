@@ -7,15 +7,15 @@ from typing import List, Dict, Any, Optional
 import re
 import json
 
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from sqlalchemy.orm import Session
 
 from src.config import (
-    LLM_MODEL, LLM_TEMPERATURE, TOP_K_CANDIDATES, TOP_K_FINAL,
+    TOP_K_CANDIDATES, TOP_K_FINAL,
     SIMILARITY_THRESHOLD, FILTER_METADATA, METADATA_KEYWORDS,
     CHUNK_SIZE, CHUNK_OVERLAP
 )
+from src.llm import get_llm, invoke_with_retry, get_provider_name
 from src.db import get_db, Document, Chunk
 from src.embeddings import embedder
 from src.reranker import reranker
@@ -52,20 +52,45 @@ Respond with ONLY a JSON array of search queries, nothing else.
 Example: ["search query 1", "search query 2"]"""
 
 
-def expand_query(query: str) -> List[str]:
+def is_simple_query(query: str) -> bool:
+    """
+    Check if query is simple enough to skip expansion.
+    Saves 1 LLM call for straightforward queries.
+    """
+    # Simple if: short, single topic, no conjunctions
+    words = query.split()
+    if len(words) <= 6:
+        return True
+    # Check for multi-topic indicators
+    multi_topic_words = [' and ', ' also ', ' plus ', ' as well as ', ' along with ']
+    if not any(w in query.lower() for w in multi_topic_words):
+        return True
+    return False
+
+
+def expand_query(query: str, force_expand: bool = False) -> List[str]:
     """
     Expand user query into optimized search queries.
     Handles: abbreviations, multi-topic questions, and ensures coverage for long docs.
     
+    Args:
+        query: User's query
+        force_expand: Force expansion even for simple queries
+    
     Returns:
         List of 1-4 search queries optimized for retrieval
     """
+    # Skip expansion for simple queries to save API calls
+    if not force_expand and is_simple_query(query):
+        return [query]
+    
     try:
-        llm = ChatGoogleGenerativeAI(model=LLM_MODEL, temperature=0.0)
-        response = llm.invoke(EXPANSION_PROMPT.format(query=query))
+        # Use unified LLM with automatic retry and fallback
+        messages = [HumanMessage(content=EXPANSION_PROMPT.format(query=query))]
+        content = invoke_with_retry(messages, temperature=0.0)
         
         # Parse JSON response
-        content = response.content.strip()
+        content = content.strip()
         # Handle markdown code blocks if present
         if content.startswith("```"):
             content = content.split("```")[1]
@@ -263,7 +288,7 @@ RULES:
 IMPORTANT: Hallucinating information is a serious error."""
 
 def generate(query: str, chunks: List[Dict[str, Any]]) -> str:
-    """Generate answer from retrieved chunks."""
+    """Generate answer from retrieved chunks with automatic fallback."""
     if not chunks:
         return "I couldn't find relevant information to answer your question."
     
@@ -273,13 +298,19 @@ def generate(query: str, chunks: List[Dict[str, Any]]) -> str:
         for i, c in enumerate(chunks)
     )
     
-    llm = ChatGoogleGenerativeAI(model=LLM_MODEL, temperature=LLM_TEMPERATURE)
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=f"Question: {query}\n\nContext:\n{context}\n\nProvide a comprehensive answer.")
     ]
     
-    return llm.invoke(messages).content
+    try:
+        # Use unified LLM with automatic retry and fallback
+        return invoke_with_retry(messages)
+    except Exception as e:
+        error_str = str(e).lower()
+        if "429" in str(e) or "quota" in error_str:
+            return "Error: API rate limit exceeded. Please try again in a few minutes."
+        raise
 
 
 # =============================================================================
@@ -311,6 +342,7 @@ def query(q: str, document_ids: List[int] = None, use_expansion: bool = True) ->
             "sources": [{"document": c["document_title"], "chunk": c["chunk_index"],
                         "relevance": round(c.get("rerank_score", 0), 3),
                         "preview": c["content"][:200] + "..."} for c in chunks],
+            "llm_provider": get_provider_name(),  # Show which provider was used
             "status": "success"
         }
     except Exception as e:
