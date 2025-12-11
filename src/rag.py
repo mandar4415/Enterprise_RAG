@@ -6,70 +6,9 @@ Production-ready with query expansion for complex queries
 from typing import List, Dict, Any, Optional
 import re
 import json
-import hashlib
-from datetime import datetime, timedelta
-from threading import Lock
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from sqlalchemy.orm import Session
-
-
-# =============================================================================
-# QUERY CACHE - Avoid duplicate API calls for same queries
-# =============================================================================
-
-class QueryCache:
-    """
-    Simple TTL-based cache for query results.
-    Caches per user+query to avoid duplicate LLM/embedding calls.
-    """
-    def __init__(self, ttl_minutes: int = 10, max_size: int = 100):
-        self._cache: Dict[str, Dict[str, Any]] = {}
-        self._lock = Lock()
-        self._ttl = timedelta(minutes=ttl_minutes)
-        self._max_size = max_size
-    
-    def _make_key(self, query: str, user_id: int, document_ids: List[int] = None) -> str:
-        """Create cache key from query params."""
-        doc_str = ",".join(map(str, sorted(document_ids or [])))
-        raw = f"{user_id}:{query.lower().strip()}:{doc_str}"
-        return hashlib.md5(raw.encode()).hexdigest()
-    
-    def get(self, query: str, user_id: int, document_ids: List[int] = None) -> Optional[Dict[str, Any]]:
-        """Get cached result if exists and not expired."""
-        key = self._make_key(query, user_id, document_ids)
-        with self._lock:
-            if key in self._cache:
-                entry = self._cache[key]
-                if datetime.utcnow() < entry["expires_at"]:
-                    entry["result"]["_cached"] = True  # Mark as cached
-                    return entry["result"]
-                else:
-                    del self._cache[key]  # Expired
-        return None
-    
-    def set(self, query: str, user_id: int, result: Dict[str, Any], document_ids: List[int] = None):
-        """Store result in cache."""
-        key = self._make_key(query, user_id, document_ids)
-        with self._lock:
-            # Evict oldest if at capacity
-            if len(self._cache) >= self._max_size:
-                oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k]["expires_at"])
-                del self._cache[oldest_key]
-            
-            self._cache[key] = {
-                "result": result.copy(),
-                "expires_at": datetime.utcnow() + self._ttl
-            }
-    
-    def clear(self):
-        """Clear all cached entries."""
-        with self._lock:
-            self._cache.clear()
-
-
-# Global cache instance (10 minute TTL, max 100 entries)
-_query_cache = QueryCache(ttl_minutes=10, max_size=100)
 
 from src.config import (
     TOP_K_CANDIDATES, TOP_K_FINAL,
@@ -226,7 +165,7 @@ def is_metadata(text: str) -> bool:
 # =============================================================================
 
 def ingest_document(file_path: str, filename: str, file_size: int, 
-                    title: str = None, description: str = None, user_id: int = None) -> Dict[str, Any]:
+                    title: str = None, description: str = None) -> Dict[str, Any]:
     """Ingest a document: extract → chunk → embed → store."""
     # Extract and clean
     text = clean_text(extract_text(file_path))
@@ -244,8 +183,7 @@ def ingest_document(file_path: str, filename: str, file_size: int,
     with get_db() as db:
         doc = Document(
             filename=filename, file_type=filename.split('.')[-1],
-            file_size=file_size, title=title or filename, description=description,
-            user_id=user_id  # Associate with user
+            file_size=file_size, title=title or filename, description=description
         )
         db.add(doc)
         db.flush()
@@ -264,18 +202,13 @@ def ingest_document(file_path: str, filename: str, file_size: int,
 # RETRIEVAL - With Multi-Query Support
 # =============================================================================
 
-def retrieve_single(query: str, document_ids: List[int] = None, top_k: int = TOP_K_CANDIDATES, user_id: int = None) -> List[Dict[str, Any]]:
+def retrieve_single(query: str, document_ids: List[int] = None, top_k: int = TOP_K_CANDIDATES) -> List[Dict[str, Any]]:
     """Retrieve chunks for a single query (internal use)."""
     query_emb = embedder.encode_single(query, is_query=True)
     
     with get_db() as db:
         # Vector search
         q = db.query(Chunk, Chunk.embedding.cosine_distance(query_emb).label('distance')).join(Document)
-        
-        # Filter by user_id (user can only search their own documents)
-        if user_id:
-            q = q.filter(Document.user_id == user_id)
-        
         if document_ids:
             q = q.filter(Chunk.document_id.in_(document_ids))
         results = q.order_by('distance').limit(top_k).all()
@@ -297,7 +230,7 @@ def retrieve_single(query: str, document_ids: List[int] = None, top_k: int = TOP
 
 
 def retrieve_with_queries(queries: List[str], original_query: str, document_ids: List[int] = None, 
-                          top_k: int = TOP_K_FINAL, user_id: int = None) -> List[Dict[str, Any]]:
+                          top_k: int = TOP_K_FINAL) -> List[Dict[str, Any]]:
     """
     Retrieve and rerank chunks using pre-expanded queries.
     
@@ -306,12 +239,11 @@ def retrieve_with_queries(queries: List[str], original_query: str, document_ids:
         original_query: Original user query (used for reranking)
         document_ids: Optional document filter
         top_k: Number of final results
-        user_id: User ID for filtering (user can only search their own documents)
     """
     # Retrieve chunks for each expanded query
     all_chunks = {}  # Use dict to dedupe by chunk ID
     for q in queries:
-        chunks = retrieve_single(q, document_ids, TOP_K_CANDIDATES, user_id)
+        chunks = retrieve_single(q, document_ids, TOP_K_CANDIDATES)
         for c in chunks:
             # Keep best similarity score if duplicate
             if c["id"] not in all_chunks or c["similarity_score"] > all_chunks[c["id"]]["similarity_score"]:
@@ -385,113 +317,73 @@ def generate(query: str, chunks: List[Dict[str, Any]]) -> str:
 # MAIN QUERY FUNCTION
 # =============================================================================
 
-def query(q: str, document_ids: List[int] = None, user_id: int = None, use_expansion: bool = True) -> Dict[str, Any]:
+def query(q: str, document_ids: List[int] = None, use_expansion: bool = True) -> Dict[str, Any]:
     """
     Main RAG query function.
-    Flow: check cache → expand → retrieve → rerank → generate → cache result
+    Flow: expand → retrieve → rerank → generate
     
     Args:
         q: User's query
         document_ids: Optional list of document IDs to search
-        user_id: User ID for filtering (user can only search their own documents)
         use_expansion: Whether to use query expansion (default: True)
     """
-    # Check cache first (saves LLM + embedding API calls for duplicate queries)
-    if user_id:
-        cached = _query_cache.get(q, user_id, document_ids)
-        if cached:
-            print(f"[Cache HIT] Query: {q[:50]}...")
-            return cached
-    
     try:
         # Expand query ONCE here (not inside retrieve to avoid duplicate LLM calls)
         expanded_queries = expand_query(q) if use_expansion else [q]
-
-        # Retrieve with pre-expanded queries (pass user_id for filtering)
-        chunks = retrieve_with_queries(expanded_queries, q, document_ids, TOP_K_FINAL, user_id)
+        
+        # Retrieve with pre-expanded queries (pass use_expansion=False since we already expanded)
+        chunks = retrieve_with_queries(expanded_queries, q, document_ids)
         answer = generate(q, chunks)
-
-        # Compute overall confidence score from reranked chunks
-        if chunks:
-            # Use the top rerank_score as overall confidence
-            top_score = chunks[0].get("rerank_score", chunks[0].get("similarity_score", 0))
-        else:
-            top_score = 0.0
-
-        # Map score to friendly badge
-        if top_score >= 0.75:
-            confidence_badge = "High Confidence"
-        elif top_score >= 0.5:
-            confidence_badge = "Medium Confidence"
-        elif top_score > 0.0:
-            confidence_badge = "Low Confidence"
-        else:
-            confidence_badge = "No Confident Match"
-
-        result = {
-            "query": q,
+        
+        return {
+            "query": q, 
+            "expanded_queries": expanded_queries,  # Show what queries were used
             "answer": answer,
-            "confidence_badge": confidence_badge,
+            "sources": [{"document": c["document_title"], "chunk": c["chunk_index"],
+                        "relevance": round(c.get("rerank_score", 0), 3),
+                        "preview": c["content"][:200] + "..."} for c in chunks],
+            "llm_provider": get_provider_name(),  # Show which provider was used
             "status": "success"
         }
-
-        # Cache result for future identical queries
-        if user_id:
-            _query_cache.set(q, user_id, result, document_ids)
-            print(f"[Cache SET] Query: {q[:50]}...")
-
-        return result
     except Exception as e:
-        return {"query": q, "answer": f"Error: {str(e)}", "confidence_badge": "Error", "status": "error"}
+        return {"query": q, "answer": f"Error: {str(e)}", "sources": [], "status": "error"}
 
 
 # =============================================================================
 # DOCUMENT MANAGEMENT
 # =============================================================================
 
-def list_documents(user_id: int = None) -> List[Dict[str, Any]]:
-    """List documents (filtered by user_id if provided)."""
+def list_documents() -> List[Dict[str, Any]]:
+    """List all documents."""
     with get_db() as db:
-        q = db.query(Document)
-        if user_id:
-            q = q.filter(Document.user_id == user_id)
-        docs = q.all()
+        docs = db.query(Document).all()
         return [{"id": d.id, "filename": d.filename, "title": d.title,
                  "file_type": d.file_type, "file_size": d.file_size,
                  "num_chunks": len(d.chunks), "created_at": d.created_at.isoformat()} for d in docs]
 
-def get_document(doc_id: int, user_id: int = None) -> Optional[Dict[str, Any]]:
-    """Get document by ID (user can only access their own documents)."""
+def get_document(doc_id: int) -> Optional[Dict[str, Any]]:
+    """Get document by ID."""
     with get_db() as db:
-        q = db.query(Document).filter(Document.id == doc_id)
-        if user_id:
-            q = q.filter(Document.user_id == user_id)
-        d = q.first()
+        d = db.query(Document).filter(Document.id == doc_id).first()
         if not d:
             return None
         return {"id": d.id, "filename": d.filename, "title": d.title, "description": d.description,
                 "file_type": d.file_type, "file_size": d.file_size, "num_chunks": len(d.chunks),
                 "created_at": d.created_at.isoformat()}
 
-def delete_document(doc_id: int, user_id: int = None) -> bool:
-    """Delete document by ID (user can only delete their own documents)."""
+def delete_document(doc_id: int) -> bool:
+    """Delete document by ID."""
     with get_db() as db:
-        q = db.query(Document).filter(Document.id == doc_id)
-        if user_id:
-            q = q.filter(Document.user_id == user_id)
-        d = q.first()
+        d = db.query(Document).filter(Document.id == doc_id).first()
         if d:
             db.delete(d)
             return True
         return False
 
-def check_duplicate(filename: str, file_size: int, user_id: int = None) -> Optional[Dict[str, Any]]:
-    """Check if document already exists for this user."""
+def check_duplicate(filename: str, file_size: int) -> Optional[Dict[str, Any]]:
+    """Check if document already exists."""
     with get_db() as db:
-        q = db.query(Document).filter(Document.filename == filename, Document.file_size == file_size)
-        if user_id:
-            q = q.filter(Document.user_id == user_id)
-        d = q.first()
+        d = db.query(Document).filter(Document.filename == filename, Document.file_size == file_size).first()
         if d:
             return {"id": d.id, "filename": d.filename, "created_at": d.created_at.isoformat()}
         return None
