@@ -1,6 +1,6 @@
 """
 Configuration for Enterprise RAG - Simplified Edition
-All settings in one place, ~50 lines
+All settings in one place
 """
 import os
 from pathlib import Path
@@ -9,10 +9,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # =============================================================================
-# API KEYS
+# LLM PROVIDERS (Priority: Groq > Gemini)
+# Set API keys in .env file:
+#   GROQ_API_KEY=your_key (14,400 req/day free)
+#   GEMINI_API_KEY=your_key (1,500 req/day free - fallback)
 # =============================================================================
+LLM_TEMPERATURE = 0.0  # Deterministic responses for consistency
+
+# Legacy: Keep for backward compatibility (not used with new llm.py)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
+if GEMINI_API_KEY:
+    os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
 
 # =============================================================================
 # DATABASE
@@ -47,12 +54,6 @@ METADATA_KEYWORDS = [
 ]
 
 # =============================================================================
-# LLM
-# =============================================================================
-LLM_MODEL = "gemini-2.0-flash"
-LLM_TEMPERATURE = 0.0
-
-# =============================================================================
 # CHUNKING (Simple character-based)
 # =============================================================================
 CHUNK_SIZE = 1000
@@ -62,6 +63,7 @@ CHUNK_OVERLAP = 200
 # FILE UPLOAD
 # =============================================================================
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB (increased for large documents)
+MAX_QUERY_LENGTH = 2000  # Max query characters
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)

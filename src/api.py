@@ -31,6 +31,7 @@ class QueryResponse(BaseModel):
     expanded_queries: Optional[List[str]] = None  # Shows what search queries were used
     answer: str
     sources: List[dict]
+    llm_provider: Optional[str] = None  # Shows which LLM provider was used
     status: str
 
 class DocumentResponse(BaseModel):
@@ -58,6 +59,7 @@ class HealthResponse(BaseModel):
     """Health check response."""
     status: str
     database: str
+    llm_provider: str
     timestamp: str
 
 class ErrorResponse(BaseModel):
@@ -105,9 +107,11 @@ async def startup():
 @app.get("/health", response_model=HealthResponse, tags=["System"])
 async def health():
     """Health check."""
+    from src.llm import get_provider_name
     return HealthResponse(
         status="healthy",
         database="connected" if check_db() else "disconnected",
+        llm_provider=get_provider_name(),
         timestamp=datetime.utcnow().isoformat()
     )
 
@@ -199,6 +203,8 @@ async def query_docs(request: QueryRequest):
     """Query policy documents."""
     if not request.query.strip():
         raise HTTPException(400, "Query cannot be empty")
+    if len(request.query) > 2000:
+        raise HTTPException(400, "Query too long. Max 2000 characters.")
     
     result = query(request.query, request.document_ids)
     return QueryResponse(**result)
