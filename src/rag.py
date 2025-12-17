@@ -1,5 +1,5 @@
 """
-RAG Pipeline for Enterprise RAG - Simplified Edition
+RAG Pipeline for Enterprise RAG.
 Simple: expand → retrieve → rerank → generate
 Production-ready with query expansion for complex queries
 """
