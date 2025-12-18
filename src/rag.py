@@ -416,7 +416,6 @@ def query(q: str, document_ids: List[int] = None, use_expansion: bool = True) ->
                 "content_preview": c["content"][:300] + "..." if len(c["content"]) > 300 else c["content"],
                 "full_content": c["content"]
             } for i, c in enumerate(chunks)],
-            "llm_provider": get_provider_name(),
             "traceability": {
                 "validation": traceability_validation,
                 "total_sources_used": len(chunks),

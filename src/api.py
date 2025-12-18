@@ -31,7 +31,6 @@ class QueryResponse(BaseModel):
     expanded_queries: Optional[List[str]] = None  # Shows what search queries were used
     answer: str
     sources: List[dict]
-    llm_provider: Optional[str] = None  # Shows which LLM provider was used
     status: str
 
 class DocumentResponse(BaseModel):
@@ -59,7 +58,6 @@ class HealthResponse(BaseModel):
     """Health check response."""
     status: str
     database: str
-    llm_provider: str
     timestamp: str
 
 class ErrorResponse(BaseModel):
@@ -111,7 +109,6 @@ async def health():
     return HealthResponse(
         status="healthy",
         database="connected" if check_db() else "disconnected",
-        llm_provider=get_provider_name(),
         timestamp=datetime.utcnow().isoformat()
     )
 
