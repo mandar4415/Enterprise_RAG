@@ -84,7 +84,11 @@ class Document(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    # Ownership
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # Nullable for now to prevent migration errors
+    
     chunks = relationship("Chunk", back_populates="document", cascade="all, delete-orphan")
+    user = relationship("src.auth.models.User", backref="documents")
 
 class Chunk(Base):
     """Document chunk with embedding."""

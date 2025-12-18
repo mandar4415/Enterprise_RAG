@@ -1,19 +1,25 @@
 """
 FastAPI Application for Enterprise RAG - Simplified Edition
 Clean API with 6 Pydantic models (~250 lines)
+Now with Authentication (Google OAuth + Email/Password OTP)
 """
 import os
 from typing import Optional, List
 from datetime import datetime
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from src.auth.dependencies import get_current_user
+from src.auth.models import User
 from src.config import ALLOWED_EXTENSIONS, MAX_FILE_SIZE, UPLOAD_DIR
 from src.db import init_db, check_db
 from src.rag import query, ingest_document, list_documents, get_document, delete_document, check_duplicate
 from src.evaluation import evaluate, get_summary
+
+# Import authentication routes
+from src.auth.routes import router as auth_router
 
 
 # =============================================================================
@@ -72,8 +78,8 @@ class ErrorResponse(BaseModel):
 
 app = FastAPI(
     title="Enterprise RAG API",
-    description="Simplified policy document query system",
-    version="2.0.0"
+    description="Simplified policy document query system with authentication",
+    version="2.1.0"
 )
 
 app.add_middleware(
@@ -84,14 +90,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include authentication routes
+app.include_router(auth_router)
+
 
 @app.on_event("startup")
 async def startup():
     """Initialize on startup."""
-    print("Starting Enterprise RAG API v2...")
+    print("Starting Enterprise RAG API v2.1 (with Authentication)...")
     if check_db():
         init_db()
-        print("Database ready!")
+        print("Database ready (including auth tables)!")
     else:
         print("WARNING: Database connection failed")
     UPLOAD_DIR.mkdir(exist_ok=True)
@@ -105,7 +114,6 @@ async def startup():
 @app.get("/health", response_model=HealthResponse, tags=["System"])
 async def health():
     """Health check."""
-    from src.llm import get_provider_name
     return HealthResponse(
         status="healthy",
         database="connected" if check_db() else "disconnected",
@@ -118,8 +126,21 @@ async def root():
     """API info."""
     return {
         "name": "Enterprise RAG API",
-        "version": "2.0.0 (Simplified)",
-        "endpoints": ["/health", "/upload", "/query", "/documents", "/evaluate"]
+        "version": "2.1.0 (with Authentication)",
+        "endpoints": {
+            "system": ["/health", "/"],
+            "documents": ["/upload", "/documents", "/documents/{id}"],
+            "query": ["/query", "/evaluate"],
+            "auth": [
+                "/auth/signup",
+                "/auth/verify-otp",
+                "/auth/login",
+                "/auth/google/login",
+                "/auth/google/callback",
+                "/auth/me",
+                "/auth/status"
+            ]
+        }
     }
 
 
@@ -131,9 +152,10 @@ async def root():
 async def upload(
     file: UploadFile = File(...),
     title: Optional[str] = Query(None),
-    description: Optional[str] = Query(None)
+    description: Optional[str] = Query(None),
+    user: User = Depends(get_current_user)
 ):
-    """Upload a policy document."""
+    """Upload a policy document (Auth required)."""
     # Validate extension
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -147,7 +169,7 @@ async def upload(
         raise HTTPException(400, "Empty file")
     
     # Check duplicate
-    existing = check_duplicate(file.filename, len(content))
+    existing = check_duplicate(file.filename, len(content), user_id=user.id)
     if existing:
         raise HTTPException(409, f"Document already exists (ID: {existing['id']})")
     
@@ -155,7 +177,7 @@ async def upload(
     path = UPLOAD_DIR / file.filename
     try:
         path.write_bytes(content)
-        result = ingest_document(str(path), file.filename, len(content), title, description)
+        result = ingest_document(str(path), file.filename, len(content), title, description, user_id=user.id)
         return DocumentResponse(
             id=result["document_id"], filename=result["filename"],
             title=result["title"], num_chunks=result["num_chunks"], status="success"
@@ -168,25 +190,25 @@ async def upload(
 
 
 @app.get("/documents", tags=["Documents"])
-async def list_docs():
-    """List all documents."""
-    docs = list_documents()
+async def list_docs(user: User = Depends(get_current_user)):
+    """List all documents for the current user."""
+    docs = list_documents(user_id=user.id)
     return {"documents": docs, "total": len(docs)}
 
 
 @app.get("/documents/{doc_id}", response_model=DocumentResponse, tags=["Documents"])
-async def get_doc(doc_id: int):
-    """Get document by ID."""
-    doc = get_document(doc_id)
+async def get_doc(doc_id: int, user: User = Depends(get_current_user)):
+    """Get document by ID (must own document)."""
+    doc = get_document(doc_id, user_id=user.id)
     if not doc:
         raise HTTPException(404, f"Document {doc_id} not found")
     return DocumentResponse(**doc, status="success")
 
 
 @app.delete("/documents/{doc_id}", tags=["Documents"])
-async def delete_doc(doc_id: int):
-    """Delete document."""
-    if not delete_document(doc_id):
+async def delete_doc(doc_id: int, user: User = Depends(get_current_user)):
+    """Delete document (must own document)."""
+    if not delete_document(doc_id, user_id=user.id):
         raise HTTPException(404, f"Document {doc_id} not found")
     return {"status": "success", "message": f"Document {doc_id} deleted"}
 
@@ -196,14 +218,15 @@ async def delete_doc(doc_id: int):
 # =============================================================================
 
 @app.post("/query", response_model=QueryResponse, tags=["Query"])
-async def query_docs(request: QueryRequest):
-    """Query policy documents."""
+async def query_docs(request: QueryRequest, user: User = Depends(get_current_user)):
+    """Query your policy documents (Auth required)."""
     if not request.query.strip():
         raise HTTPException(400, "Query cannot be empty")
     if len(request.query) > 2000:
         raise HTTPException(400, "Query too long. Max 2000 characters.")
     
-    result = query(request.query, request.document_ids)
+    # Pass user_id for filtering
+    result = query(request.query, request.document_ids, user_id=user.id)
     return QueryResponse(**result)
 
 
@@ -212,13 +235,13 @@ async def query_docs(request: QueryRequest):
 # =============================================================================
 
 @app.post("/evaluate", response_model=EvaluationResponse, tags=["Evaluation"])
-async def evaluate_query(request: QueryRequest):
+async def evaluate_query(request: QueryRequest, user: User = Depends(get_current_user)):
     """Query and evaluate RAG pipeline."""
     if not request.query.strip():
         raise HTTPException(400, "Query cannot be empty")
     
     # Run query (includes query expansion)
-    result = query(request.query, request.document_ids)
+    result = query(request.query, request.document_ids, user_id=user.id)
     
     if result["status"] == "error" or not result["sources"]:
         raise HTTPException(400, "No context retrieved for evaluation")

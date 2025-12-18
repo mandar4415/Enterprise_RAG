@@ -1,10 +1,10 @@
-# Enterprise RAG v2 - Simplified Dependencies
+# Enterprise RAG v2.1 - With Authentication
 # Core API
 fastapi
 uvicorn[standard]
 python-dotenv
 python-multipart
-pydantic
+pydantic[email]
 
 # Database
 psycopg2-binary
@@ -26,5 +26,8 @@ torch
 pypdf
 python-docx
 
-# Note: Removed langgraph, ragas, deepeval, datasets
-# These are no longer needed in the simplified version
+# Authentication (NEW)
+passlib[bcrypt]
+pyjwt
+httpx
+
