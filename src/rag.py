@@ -271,32 +271,97 @@ def retrieve(query: str, document_ids: List[int] = None, top_k: int = TOP_K_FINA
     return reranker.rerank(query, chunks, top_k)
 
 
-# =============================================================================
-# GENERATION
-# =============================================================================
+def validate_answer_traceability(answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Validate that all citations in the answer correspond to actual sources.
+    Returns validation results for traceability auditing.
+    """
+    import re
+    
+    # Extract all citations from answer
+    citation_pattern = r'\(Source (\d+): "([^"]+)"\)'
+    citations = re.findall(citation_pattern, answer)
+    
+    validation_results = {
+        "total_citations": len(citations),
+        "valid_citations": 0,
+        "invalid_citations": 0,
+        "missing_citations": [],
+        "citation_details": []
+    }
+    
+    for source_num, quoted_text in citations:
+        source_idx = int(source_num) - 1  # Convert to 0-based index
+        
+        if 0 <= source_idx < len(chunks):
+            chunk_content = chunks[source_idx]["content"]
+            if quoted_text.strip() in chunk_content:
+                validation_results["valid_citations"] += 1
+                validation_results["citation_details"].append({
+                    "source": source_num,
+                    "quote": quoted_text,
+                    "valid": True,
+                    "chunk_content": chunk_content[:100] + "..."
+                })
+            else:
+                validation_results["invalid_citations"] += 1
+                validation_results["citation_details"].append({
+                    "source": source_num,
+                    "quote": quoted_text,
+                    "valid": False,
+                    "reason": "Quote not found in source chunk",
+                    "chunk_content": chunk_content[:100] + "..."
+                })
+        else:
+            validation_results["invalid_citations"] += 1
+            validation_results["citation_details"].append({
+                "source": source_num,
+                "quote": quoted_text,
+                "valid": False,
+                "reason": "Source number out of range"
+            })
+    
+    # Check for uncited claims (basic heuristic)
+    sentences = [s.strip() for s in answer.split('.') if s.strip()]
+    cited_sentences = 0
+    for sentence in sentences:
+        if re.search(citation_pattern, sentence):
+            cited_sentences += 1
+    
+    validation_results["citation_coverage"] = cited_sentences / len(sentences) if sentences else 0
+    
+    return validation_results
 
-SYSTEM_PROMPT = """You are an expert policy assistant.
+SYSTEM_PROMPT = """You are an expert assistant that provides accurate, traceable answers.
 
-RULES:
-1. ONLY use information from the provided context
-2. DO NOT add information from your general knowledge
-3. Cite sources using (Source X) format
+CRITICAL RULES:
+1. ONLY use information from the provided context chunks
+2. NEVER add information from your general knowledge
+3. Cite EVERY piece of information using the exact format: (Source X: "exact quote from chunk")
 4. If information is missing, say "Based on the documents, I don't have information about [topic]"
-5. Include ALL relevant details, requirements, and conditions from the context
+5. Include ALL relevant details from the context
 6. List ALL numbered items or bullet points if present
 
-IMPORTANT: Hallucinating information is a serious error."""
+TRACEABILITY REQUIREMENT: Every factual claim must include a citation showing exactly where it came from.
+
+IMPORTANT: Hallucinating information is a serious error that breaks traceability."""
 
 def generate(query: str, chunks: List[Dict[str, Any]]) -> str:
     """Generate answer from retrieved chunks with automatic fallback."""
     if not chunks:
         return "I couldn't find relevant information to answer your question."
     
-    # Format context
-    context = "\n---\n".join(
-        f"[Source {i+1}: {c['document_title']} (relevance: {c.get('rerank_score', c.get('similarity_score', 0)):.2f})]\n{c['content']}"
-        for i, c in enumerate(chunks)
-    )
+    # Format context with traceable source information
+    context_parts = []
+    for i, c in enumerate(chunks):
+        source_info = f"""Source {i+1}:
+Document: {c['document_title']}
+Chunk: {c['chunk_index']}
+Relevance: {c.get('rerank_score', c.get('similarity_score', 0)):.3f}
+Content: {c['content']}"""
+        context_parts.append(source_info)
+    
+    context = "\n\n---\n\n".join(context_parts)
     
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
@@ -335,14 +400,29 @@ def query(q: str, document_ids: List[int] = None, use_expansion: bool = True) ->
         chunks = retrieve_with_queries(expanded_queries, q, document_ids)
         answer = generate(q, chunks)
         
+        # Validate answer traceability
+        traceability_validation = validate_answer_traceability(answer, chunks)
+        
         return {
             "query": q, 
-            "expanded_queries": expanded_queries,  # Show what queries were used
+            "expanded_queries": expanded_queries,
             "answer": answer,
-            "sources": [{"document": c["document_title"], "chunk": c["chunk_index"],
-                        "relevance": round(c.get("rerank_score", 0), 3),
-                        "preview": c["content"][:200] + "..."} for c in chunks],
-            "llm_provider": get_provider_name(),  # Show which provider was used
+            "sources": [{
+                "source_id": f"Source {i+1}",
+                "document": c["document_title"],
+                "document_id": c["document_id"],
+                "chunk_index": c["chunk_index"],
+                "relevance_score": round(c.get("rerank_score", c.get("similarity_score", 0)), 3),
+                "content_preview": c["content"][:300] + "..." if len(c["content"]) > 300 else c["content"],
+                "full_content": c["content"]
+            } for i, c in enumerate(chunks)],
+            "llm_provider": get_provider_name(),
+            "traceability": {
+                "validation": traceability_validation,
+                "total_sources_used": len(chunks),
+                "citation_format": "Source X: \"exact quote\"",
+                "traceable": traceability_validation["invalid_citations"] == 0
+            },
             "status": "success"
         }
     except Exception as e:
