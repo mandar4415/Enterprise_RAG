@@ -116,19 +116,26 @@ def expand_query(query: str, force_expand: bool = False) -> List[str]:
 # TEXT PROCESSING
 # =============================================================================
 
-def extract_text(file_path: str) -> str:
-    """Extract text from PDF, DOCX, or TXT files."""
+def extract_text(file_path: str) -> List[Dict[str, Any]]:
+    """
+    Extract text from files, returning list of pages.
+    Returns: [{'text': 'content', 'page': 1}, ...]
+    """
     from pathlib import Path
     ext = Path(file_path).suffix.lower()
     
     if ext == ".pdf":
         from pypdf import PdfReader
-        return "\n\n".join(p.extract_text() or "" for p in PdfReader(file_path).pages)
+        reader = PdfReader(file_path)
+        return [{"text": p.extract_text() or "", "page": i + 1} for i, p in enumerate(reader.pages)]
     elif ext == ".docx":
         from docx import Document as DocxDoc
-        return "\n\n".join(p.text for p in DocxDoc(file_path).paragraphs if p.text.strip())
+        # DOCX has no pages, return as single 'page' with None
+        text = "\n\n".join(p.text for p in DocxDoc(file_path).paragraphs if p.text.strip())
+        return [{"text": text, "page": None}]
     elif ext == ".txt":
-        return Path(file_path).read_text(encoding='utf-8')
+        text = Path(file_path).read_text(encoding='utf-8')
+        return [{"text": text, "page": None}]
     raise ValueError(f"Unsupported file type: {ext}")
 
 def clean_text(text: str) -> str:
@@ -138,14 +145,34 @@ def clean_text(text: str) -> str:
     text = re.sub(r' {2,}', ' ', text)
     return text.strip()
 
-def chunk_text(text: str) -> List[Dict[str, Any]]:
-    """Split text into chunks using simple character-based splitting."""
+def chunk_text(pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Split text into chunks, respecting page boundaries.
+    """
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP,
         separators=["\n\n", "\n", ". ", " ", ""]
     )
-    chunks = splitter.split_text(text)
-    return [{"content": c, "chunk_index": i} for i, c in enumerate(chunks)]
+    
+    all_chunks = []
+    global_chunk_index = 0
+    
+    for page in pages:
+        raw_text = clean_text(page["text"])
+        if not raw_text:
+            continue
+            
+        page_chunks = splitter.split_text(raw_text)
+        
+        for c in page_chunks:
+            all_chunks.append({
+                "content": c, 
+                "chunk_index": global_chunk_index,
+                "page_number": page["page"]
+            })
+            global_chunk_index += 1
+            
+    return all_chunks
 
 def is_metadata(text: str) -> bool:
     """Check if chunk is metadata/header content."""
@@ -164,20 +191,18 @@ def is_metadata(text: str) -> bool:
 # INGESTION
 # =============================================================================
 
-# =============================================================================
-# INGESTION
-# =============================================================================
-
 def ingest_document(file_path: str, filename: str, file_size: int, 
                     title: str = None, description: str = None, user_id: int = None) -> Dict[str, Any]:
     """Ingest a document: extract → chunk → embed → store."""
-    # Extract and clean
-    text = clean_text(extract_text(file_path))
-    if not text:
+    # Extract
+    pages = extract_text(file_path)
+    if not pages:
         raise ValueError("No text content found")
     
-    # Chunk
-    chunks = chunk_text(text)
+    # Chunk with page awareness
+    chunks = chunk_text(pages)
+    if not chunks:
+        raise ValueError("No text content found after cleaning")
     
     # Generate embeddings
     contents = [c["content"] for c in chunks]
@@ -193,10 +218,13 @@ def ingest_document(file_path: str, filename: str, file_size: int,
         db.add(doc)
         db.flush()
         
-        for chunk, emb in zip(chunks, embeddings):
+        for chunk_data, emb in zip(chunks, embeddings):
             db.add(Chunk(
-                document_id=doc.id, content=chunk["content"],
-                chunk_index=chunk["chunk_index"], embedding=emb
+                document_id=doc.id, 
+                content=chunk_data["content"],
+                chunk_index=chunk_data["chunk_index"], 
+                page_number=chunk_data["page_number"], # New V2.0 Field
+                embedding=emb
             ))
         
         return {"document_id": doc.id, "filename": filename, "num_chunks": len(chunks),
@@ -234,6 +262,7 @@ def retrieve_single(query: str, document_ids: List[int] = None, top_k: int = TOP
             chunks.append({
                 "id": chunk.id, "document_id": chunk.document_id,
                 "content": chunk.content, "chunk_index": chunk.chunk_index,
+                "page_number": chunk.page_number,  # V2.0: Added page number
                 "document_title": chunk.document.title,
                 "similarity_score": sim
             })
@@ -275,6 +304,10 @@ def retrieve(query: str, document_ids: List[int] = None, top_k: int = TOP_K_FINA
     return reranker.rerank(query, chunks, top_k)
 
 
+# =============================================================================
+# ANSWER VALIDATION - V2.0 Enhanced Traceability
+# =============================================================================
+
 def validate_answer_traceability(answer: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Validate that all citations in the answer correspond to actual sources.
@@ -283,7 +316,11 @@ def validate_answer_traceability(answer: str, chunks: List[Dict[str, Any]]) -> D
     import re
     
     # Extract all citations from answer
-    citation_pattern = r'\(Source (\d+): "([^"]+)"\)'
+    # Matches: (Source 1: "quote") OR (Source 1 [Page 32]: "quote") OR (Source 1 [Page 32, Chunk 102]: "quote")
+    # Group 1: Source ID
+    # Group 2: Page Number (Optional, flexible match inside [])
+    # Group 3: Quote
+    citation_pattern = r'\(Source (\d+)(?: \[.*?Page (\d+).*?\])?: "([^"]+)"\)'
     citations = re.findall(citation_pattern, answer)
     
     validation_results = {
@@ -294,26 +331,41 @@ def validate_answer_traceability(answer: str, chunks: List[Dict[str, Any]]) -> D
         "citation_details": []
     }
     
-    for source_num, quoted_text in citations:
+    for source_num, page_num, quoted_text in citations:
         source_idx = int(source_num) - 1  # Convert to 0-based index
         
         if 0 <= source_idx < len(chunks):
-            chunk_content = chunks[source_idx]["content"]
-            if quoted_text.strip() in chunk_content:
+            chunk = chunks[source_idx]
+            chunk_content = chunk["content"]
+            
+            # Validate Quote
+            quote_valid = quoted_text.strip() in chunk_content
+            
+            # Validate Page Number (if present in answer)
+            page_valid = True
+            if page_num:
+                # If answer cites a page, check if it matches the chunk's real page
+                expected_page = chunk.get("page_number")
+                if expected_page and int(page_num) != expected_page:
+                    page_valid = False
+            
+            if quote_valid and page_valid:
                 validation_results["valid_citations"] += 1
                 validation_results["citation_details"].append({
                     "source": source_num,
+                    "page": page_num,
                     "quote": quoted_text,
                     "valid": True,
                     "chunk_content": chunk_content[:100] + "..."
                 })
             else:
                 validation_results["invalid_citations"] += 1
+                reason = "Quote not found" if not quote_valid else "Incorrect ID/Page"
                 validation_results["citation_details"].append({
                     "source": source_num,
                     "quote": quoted_text,
                     "valid": False,
-                    "reason": "Quote not found in source chunk",
+                    "reason": reason,
                     "chunk_content": chunk_content[:100] + "..."
                 })
         else:
@@ -329,7 +381,7 @@ def validate_answer_traceability(answer: str, chunks: List[Dict[str, Any]]) -> D
     sentences = [s.strip() for s in answer.split('.') if s.strip()]
     cited_sentences = 0
     for sentence in sentences:
-        if re.search(citation_pattern, sentence):
+        if re.search(r'\(Source \d+', sentence):
             cited_sentences += 1
     
     validation_results["citation_coverage"] = cited_sentences / len(sentences) if sentences else 0
@@ -339,12 +391,14 @@ def validate_answer_traceability(answer: str, chunks: List[Dict[str, Any]]) -> D
 SYSTEM_PROMPT = """You are an expert assistant that provides accurate, traceable answers.
 
 CRITICAL RULES:
-1. ONLY use information from the provided context chunks
-2. NEVER add information from your general knowledge
-3. Cite EVERY piece of information using the exact format: (Source X: "exact quote from chunk")
+1. ONLY use information from the provided context chunks.
+2. NEVER add information from your general knowledge.
+3. Cite EVERY piece of information using the exact format: 
+   - If Page number is available: (Source X [Page Y]: "exact quote from chunk")
+   - If no Page number: (Source X: "exact quote from chunk")
 4. If information is missing, say "Based on the documents, I don't have information about [topic]"
-5. Include ALL relevant details from the context
-6. List ALL numbered items or bullet points if present
+5. Include ALL relevant details from the context.
+6. List ALL numbered items or bullet points if present.
 
 TRACEABILITY REQUIREMENT: Every factual claim must include a citation showing exactly where it came from.
 
@@ -358,8 +412,11 @@ def generate(query: str, chunks: List[Dict[str, Any]]) -> str:
     # Format context with traceable source information
     context_parts = []
     for i, c in enumerate(chunks):
+        page_info = f"Page: {c['page_number']}" if c.get('page_number') else "Page: N/A"
+        
         source_info = f"""Source {i+1}:
 Document: {c['document_title']}
+{page_info}
 Chunk: {c['chunk_index']}
 Relevance: {c.get('rerank_score', c.get('similarity_score', 0)):.3f}
 Content: {c['content']}"""
@@ -408,6 +465,7 @@ def query(q: str, document_ids: List[int] = None, use_expansion: bool = True, us
                 "source_id": f"Source {i+1}",
                 "document": c["document_title"],
                 "document_id": c["document_id"],
+                "page_number": c.get("page_number"), # V2.0: Added page number
                 "chunk_index": c["chunk_index"],
                 "relevance_score": round(c.get("rerank_score", c.get("similarity_score", 0)), 3),
                 "content_preview": c["content"][:300] + "..." if len(c["content"]) > 300 else c["content"],
@@ -416,7 +474,7 @@ def query(q: str, document_ids: List[int] = None, use_expansion: bool = True, us
             "traceability": {
                 "validation": traceability_validation,
                 "total_sources_used": len(chunks),
-                "citation_format": "Source X: \"exact quote\"",
+                "citation_format": "Source X [Page Y]: \"exact quote\"",
                 "traceable": traceability_validation["invalid_citations"] == 0
             },
             "status": "success"

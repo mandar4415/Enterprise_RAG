@@ -98,6 +98,7 @@ class Chunk(Base):
     document_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     content = Column(Text, nullable=False)
     chunk_index = Column(Integer, nullable=False)
+    page_number = Column(Integer, nullable=True)  # V2.0: Added for traceability
     start_char = Column(Integer)
     end_char = Column(Integer)
     embedding = Column(Vector(EMBEDDING_DIM), nullable=False)
