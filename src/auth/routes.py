@@ -4,6 +4,7 @@ Provides both Google OAuth and Email/Password with OTP verification.
 """
 from datetime import datetime
 from typing import Optional
+import json
 
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field, EmailStr
@@ -366,17 +367,26 @@ async def google_callback(code: str = Query(...)):
         # Create access token
         access_token = create_access_token(data={"sub": str(user.id)})
         
-        return TokenResponse(
-            access_token=access_token,
-            user={
-                "id": user.id,
-                "email": user.email,
-                "name": user.name,
-                "auth_provider": user.auth_provider,
-                "is_email_verified": user.is_email_verified,
-                "profile_picture": user.profile_picture
-            }
-        )
+        # Redirect to Frontend with Token
+        from fastapi.responses import RedirectResponse
+        from urllib.parse import urlencode
+        
+        user_data = {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "profile_picture": user.profile_picture
+        }
+        
+        # Build redirect URL with proper encoding
+        FRONTEND_URL = "http://localhost:5173/auth/callback"
+        params = {
+            "token": access_token,
+            "user": json.dumps(user_data)
+        }
+        redirect_url = f"{FRONTEND_URL}?{urlencode(params)}"
+        
+        return RedirectResponse(url=redirect_url, status_code=302)
 
 
 # =============================================================================

@@ -5,8 +5,8 @@ import secrets
 import string
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
+import bcrypt  # Using bcrypt directly instead of passlib to avoid version conflicts
 
-from passlib.context import CryptContext
 import jwt
 
 from src.auth.config import (
@@ -14,22 +14,41 @@ from src.auth.config import (
     OTP_LENGTH, OTP_EXPIRY_MINUTES, PASSWORD_MIN_LENGTH
 )
 
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-
 # =============================================================================
 # PASSWORD HASHING
 # =============================================================================
 
 def hash_password(password: str) -> str:
-    """Hash a password using bcrypt."""
-    return pwd_context.hash(password)
+    """
+    Hash a password using bcrypt.
+    Handles byte conversion to avoid 'password must be bytes' errors.
+    """
+    # bcrypt requires bytes, so we encode the password
+    pwd_bytes = password.encode('utf-8')
+    
+    # Generate a salt and hash the password
+    # gensalt() generates a random salt
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(pwd_bytes, salt)
+    
+    # Return as string for database storage
+    return hashed.decode('utf-8')
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    """
+    Verify a password against its hash.
+    Safe against timing attacks.
+    """
+    try:
+        # Convert both to bytes for bcrypt
+        pwd_bytes = plain_password.encode('utf-8')
+        hash_bytes = hashed_password.encode('utf-8')
+        
+        return bcrypt.checkpw(pwd_bytes, hash_bytes)
+    except Exception:
+        # If hash format is invalid (e.g. legacy data), fail safe
+        return False
 
 
 def validate_password(password: str) -> tuple[bool, str]:
