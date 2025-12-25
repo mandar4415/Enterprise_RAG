@@ -16,6 +16,12 @@ The core of the system is a sophisticated hybrid retrieval engine:
 - **Vector Database**: **pgvector** (PostgreSQL) for scalable vector similarity search.
 - **Chunking Strategy**: Smart recursive character splitting with overlap to preserve context.
 
+### 📚 Rich Metadata & Traceability (Key Feature)
+Unlike standard RAG that just dumps text, this engine preserves **granular context**:
+- **Precise Citations**: API responses return exact **Page Numbers** and **Chunk Indices** for every piece of evidence.
+- **Source Attribution**: The LLM is instructed to cite sources (e.g., `[Source 1]`) which map back to specific file locations.
+- **Preview Context**: Retrieval results exclude raw header/footer noise but retain semantic context windows.
+
 ### 🛡️ Enterprise Authentication
 - **Dual Auth System**:
   - **Google OAuth2**: Seamless corporate login integration.
@@ -29,8 +35,11 @@ The core of the system is a sophisticated hybrid retrieval engine:
 A stunning, high-performance UI built for modern executives:
 - **Glassmorphism UI**: Dark mode, translucent panels, and neon accents (`#6366f1` Indigo / `#10b981` Emerald).
 - **Interactive Chat**: Streaming AI responses with visible "Thinking Process" indicators.
-- **Source Traceability**: Clickable citations `[Source 1]` that open a detailed **Source Drawer**.
-- **Document Management**: Drag-and-drop ingestion engine with instant processing feedback.
+- **Source Verification**: Clickable citations `[Source 1]` open a drawer showing:
+  - Document Name & ID
+  - Page Number
+  - Relevance Score (Color-coded)
+  - Full Text Content
 
 ---
 
@@ -38,16 +47,16 @@ A stunning, high-performance UI built for modern executives:
 
 ```mermaid
 graph TD
-    A[User Frontend] -->|JWT Auth| B[FastAPI Gateway]
-    B -->|Auth/OTP| C[PostgreSQL (Users)]
-    B -->|Upload| D[Ingestion Pipeline]
-    D -->|Chunk & Embed| E(Nomic Embeddings)
-    E -->|Store Vectors| F[pgvector DB]
+    A["User Frontend"] -->|JWT Auth| B["FastAPI Gateway"]
+    B -->|Auth/OTP| C["PostgreSQL (Users)"]
+    B -->|Upload| D["Ingestion Pipeline"]
+    D -->|Chunk & Embed| E("Nomic Embeddings")
+    E -->|Store Vectors| F["pgvector DB"]
     
-    B -->|Query| G[RAG Engine]
+    B -->|Query| G["RAG Engine"]
     G -->|Similarity Search| F
-    G -->|Rerank Candidates| H(Cross-Encoder)
-    H -->|Top K Context| I[LLM Generation]
+    G -->|Rerank Candidates| H("Cross-Encoder")
+    H -->|Top K Context| I["LLM Generation"]
     I -->|Stream Answer| A
 ```
 
@@ -112,9 +121,23 @@ python -m uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
 ## 📚 API Documentation
 
 ### Retrieval Endpoint (`/query`)
-- **Input**: User natural language query.
-- **Process**: Embeds query → Searches DB → Reranks top 10 matches → Generates Answer.
-- **Output**: JSON containing `answer`, `sources` (with snippets), and `thinking_process`.
+The query response includes detailed metadata for traceability:
+
+```json
+{
+  "answer": "According to the policy...",
+  "sources": [
+    {
+      "source_id": "Source 1",
+      "document": "Employee_Handbook_2024.pdf",
+      "page_number": 12,
+      "chunk_index": 45,
+      "relevance_score": 0.89,
+      "content_preview": "Employees must submit expense reports..."
+    }
+  ]
+}
+```
 
 ### Ingestion Endpoint (`/upload`)
 - **Input**: PDF/DOCX/TXT files (Multipart).
