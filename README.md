@@ -1,6 +1,6 @@
-# Enterprise RAG: Cyber-Executive Intelligence System 🧠✨
+# Enterprise RAG: Executive Intelligence System 🧠✨
 
-> A production-grade Retrieval-Augmented Generation (RAG) platform designed for enterprise document intelligence. Built with **FastAPI**, **PostgreSQL**, and a highly interactive **React** frontend using the "Cyber-Executive" design system.
+> A production-grade Retrieval-Augmented Generation (RAG) platform designed for enterprise document intelligence. Built with **FastAPI**, **PostgreSQL**, and a highly interactive **React** frontend using the "Modern Executive" design system.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.14-blue.svg)
@@ -31,9 +31,9 @@ Unlike standard RAG that just dumps text, this engine preserves **granular conte
   - JWT Tokens with auto-expiry and HttpOnly references.
   - Role-based route protection.
 
-### 💻 "Cyber-Executive" Frontend
-A stunning, high-performance UI built for modern executives:
-- **Glassmorphism UI**: Dark mode, translucent panels, and neon accents (`#6366f1` Indigo / `#10b981` Emerald).
+### 💻 "Modern Executive" Frontend
+A stunning, high-performance UI built for professional environments:
+- **Glassmorphism UI**: Dark mode, translucent panels, and focused accents (`#6366f1` Indigo / `#10b981` Emerald).
 - **Interactive Chat**: Streaming AI responses with visible "Thinking Process" indicators.
 - **Source Verification**: Clickable citations `[Source 1]` open a drawer showing:
   - Document Name & ID

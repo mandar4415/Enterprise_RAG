@@ -1,8 +1,8 @@
 # Enterprise RAG Frontend 💻✨
 
-> The "Cyber-Executive" interface for the Enterprise RAG system. A high-performance React application focusing on traceability, data visualization, and seamless user interaction.
+> The "Modern Executive" interface for the Enterprise RAG system. A high-performance React application focusing on traceability, data visualization, and seamless user interaction.
 
-## 🎨 Design System: "Cyber-Executive"
+## 🎨 Design System: "Modern Executive"
 
 The UI is built on a custom design language defined in `index.css`:
 - **Primary Color**: Neon Indigo (`#6366f1`) - Used for primary actions and focus states.
