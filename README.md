@@ -143,6 +143,25 @@ The query response includes detailed metadata for traceability:
 - **Input**: PDF/DOCX/TXT files (Multipart).
 - **Process**: OCR/Text Extraction → Chunking (512 tokens) → Embedding → Storage.
 
+### Evaluation Endpoint (`/evaluate`)
+The system includes a built-in evaluator to measure RAG performance:
+
+```json
+{
+  "query": "What is the vacation policy?",
+  "evaluation": {
+    "faithfulness": 1.0,      // No hallucinations (0.0 - 1.0)
+    "answer_relevancy": 0.9,  // Addresses user query (0.0 - 1.0)
+    "overall": 0.96           // Weighted score
+  },
+  "feedback": {
+    "hallucinations": [],
+    "missed_aspects": ["Did not mention carry-over rules"]
+  },
+  "summary": "RAG Evaluation: EXCELLENT (96%)"
+}
+```
+
 ---
 
 ## 🔒 Security Notes
