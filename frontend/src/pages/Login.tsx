@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Lock, 
   Mail, 
@@ -10,44 +10,46 @@ import {
 } from 'lucide-react';
 import { useNavigate, Link } from 'react-router-dom';
 import { authService } from '../api/services';
-import { useAuth } from '../hooks/useAuth';
+import { useAppDispatch, useAppSelector } from '../store/hooks';
+import { loginUser, clearError } from '../features/auth/authSlice';
 import './Login.css';
 
 export default function Login() {
   const navigate = useNavigate();
-  const { login } = useAuth();
+  const dispatch = useAppDispatch();
+  const { isLoading, error, isAuthenticated } = useAppSelector(state => state.auth);
+  
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  // Redirect if already authenticated
+  useEffect(() => {
+    if (isAuthenticated) {
+      navigate('/dashboard');
+    }
+  }, [isAuthenticated, navigate]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsLoading(true);
-    setError(null);
     
-    try {
-      const response = await authService.login(email, password);
-      login(response.access_token, response.user);
+    // We unwrap the result to handle the navigation immediately after success
+    const result = await dispatch(loginUser({ email, password }));
+    
+    if (loginUser.fulfilled.match(result)) {
       navigate('/dashboard');
-    } catch (err: any) {
-      console.error("Login failed:", err);
-      setError(err.response?.data?.detail || "Login failed. Please check your credentials.");
-    } finally {
-      setIsLoading(false);
     }
   };
 
   const handleGoogleLogin = async () => {
+    dispatch(clearError());
     setIsGoogleLoading(true);
-    setError(null);
     try {
       const url = await authService.getGoogleLoginUrl();
       window.location.href = url;
     } catch (err: any) {
       console.error("Google login init failed:", err);
-      setError("Failed to connect to Google. Please try again.");
+    } finally {
       setIsGoogleLoading(false);
     }
   };

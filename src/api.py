@@ -7,7 +7,7 @@ import os
 from typing import Optional, List
 from datetime import datetime
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Depends
+from fastapi import FastAPI, File, UploadFile, HTTPException, Query, Depends, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -92,6 +92,12 @@ app.add_middleware(
 
 # Include authentication routes
 app.include_router(auth_router)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """Silence favicon.ico 404 logs."""
+    return Response(status_code=204)
 
 
 @app.on_event("startup")

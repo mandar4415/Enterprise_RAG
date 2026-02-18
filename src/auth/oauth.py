@@ -60,7 +60,7 @@ async def verify_google_token(code: str) -> Optional[GoogleUserInfo]:
     Returns:
         GoogleUserInfo if successful, None otherwise
     """
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         # Exchange code for access token
         token_response = await client.post(
             GOOGLE_TOKEN_URL,

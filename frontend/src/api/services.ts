@@ -6,6 +6,7 @@ export interface User {
     name: string;
     auth_provider: string;
     is_email_verified: boolean;
+    profile_picture?: string;
 }
 
 export interface AuthResponse {

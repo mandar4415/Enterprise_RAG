@@ -2,30 +2,31 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Send, Cpu, User as UserIcon, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import SourceDrawer from './SourceDrawer';
-import { ragService, Source } from '../api/services';
+import { Source } from '../api/services';
 import '../styles/Dashboard.css';
-
-interface Message {
-  id: string;
-  role: 'user' | 'ai';
-  content: string;
-  sources?: Source[];
-}
+import { useAppDispatch, useAppSelector } from '../store/hooks';
+import { 
+  addMessage, 
+  setActiveSources, 
+  setDrawerOpen, 
+  setActiveSourceId,
+  askQuestion
+} from '../features/chat/chatSlice';
 
 export default function ChatInterface() {
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: '1',
-      role: 'ai',
-      content: "Hello! I'm your Enterprise RAG assistant. I have access to all your uploaded policy documents. Ask me anything about your organization's policies, procedures, or guidelines.\n\n**Tip:** Upload documents first via the Documents tab, then come back here to query them!"
-    }
-  ]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [activeSources, setActiveSources] = useState<Source[]>([]);
-  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-  const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
-  const [currentStep, setCurrentStep] = useState<string | null>(null);
+  
+  // Use Redux state (The Warehouse)
+  const { 
+    messages, 
+    isLoading, 
+    activeSources, 
+    isDrawerOpen, 
+    activeSourceId, 
+    currentStep 
+  } = useAppSelector((state) => state.chat);
+  
+  const dispatch = useAppDispatch();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -50,59 +51,26 @@ export default function ChatInterface() {
     if (!input.trim() || isLoading) return;
 
     const userQuery = input.trim();
-    const userMsg: Message = { id: Date.now().toString(), role: 'user', content: userQuery };
-    setMessages(prev => [...prev, userMsg]);
+    
+    // 1. Add user message locally
+    dispatch(addMessage({ 
+      id: Date.now().toString(), 
+      role: 'user', 
+      content: userQuery 
+    }));
+
     setInput('');
-    setIsLoading(true);
 
-    // Show thinking steps
-    const steps = [
-      "Analyzing your question...",
-      "Searching knowledge base...",
-      "Reranking relevant chunks...",
-      "Generating answer..."
-    ];
-
-    // Start API call
-    const apiPromise = ragService.query(userQuery);
-    
-    // Show steps while waiting
-    for (const step of steps) {
-      setCurrentStep(step);
-      await new Promise(r => setTimeout(r, 500));
-    }
-    
-    try {
-      const response = await apiPromise;
-      
-      const aiResponse: Message = {
-        id: Date.now().toString(),
-        role: 'ai',
-        content: response.answer,
-        sources: response.sources
-      };
-
-      setMessages(prev => [...prev, aiResponse]);
-    } catch (error: any) {
-      console.error('Query failed:', error);
-      const errorMessage = error.response?.data?.detail || "Failed to get response. Please try again.";
-      
-      const errorMsg: Message = {
-        id: Date.now().toString(),
-        role: 'ai',
-        content: `⚠️ **Error:** ${errorMessage}\n\nPlease make sure you have uploaded documents and try again.`
-      };
-      setMessages(prev => [...prev, errorMsg]);
-    } finally {
-      setIsLoading(false);
-      setCurrentStep(null);
-    }
+    // 2. DISPATCH THE THUNK (The big move!)
+    // All the complexity of API calls, thinking steps, and loading state
+    // is now the "Manager's" (Thunk) responsibility.
+    dispatch(askQuestion(userQuery));
   };
 
   const handleCitationClick = (sourceId: string, sources: Source[]) => {
-    setActiveSources(sources);
-    setActiveSourceId(sourceId);
-    setIsDrawerOpen(true);
+    dispatch(setActiveSources(sources));
+    dispatch(setActiveSourceId(sourceId));
+    dispatch(setDrawerOpen(true));
   };
 
   // Render content with clickable citations
@@ -151,7 +119,7 @@ export default function ChatInterface() {
       {/* Source Drawer */}
       <SourceDrawer 
         isOpen={isDrawerOpen} 
-        onClose={() => setIsDrawerOpen(false)} 
+        onClose={() => dispatch(setDrawerOpen(false))} 
         sources={activeSources}
         activeSourceId={activeSourceId}
       />

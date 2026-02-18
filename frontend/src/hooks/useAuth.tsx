@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { createContext, useContext, ReactNode } from 'react';
+import { useAppSelector, useAppDispatch } from '../store/hooks';
+import { setCredentials, logout as logoutAction } from '../features/auth/authSlice';
 
 interface User {
   id: number;
@@ -17,50 +18,26 @@ interface AuthContextType {
   logout: () => void;
 }
 
+// We keep the Context to avoid breaking types, but it's now a thin wrapper around Redux
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-
-  useEffect(() => {
-    // Check for existing session on mount
-    const storedToken = localStorage.getItem('access_token');
-    const storedUser = localStorage.getItem('user');
-    
-    if (storedToken && storedUser) {
-      try {
-        setToken(storedToken);
-        setUser(JSON.parse(storedUser));
-      } catch (e) {
-        // Invalid stored data, clear it
-        localStorage.removeItem('access_token');
-        localStorage.removeItem('user');
-      }
-    }
-    setIsLoading(false);
-  }, []);
+  const { user, token, isAuthenticated, isLoading } = useAppSelector((state) => state.auth);
+  const dispatch = useAppDispatch();
 
   const login = (newToken: string, newUser: User) => {
-    localStorage.setItem('access_token', newToken);
-    localStorage.setItem('user', JSON.stringify(newUser));
-    setToken(newToken);
-    setUser(newUser);
+    dispatch(setCredentials({ token: newToken, user: newUser }));
   };
 
   const logout = () => {
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('user');
-    setToken(null);
-    setUser(null);
+    dispatch(logoutAction());
   };
 
   return (
     <AuthContext.Provider value={{
       user,
       token,
-      isAuthenticated: !!token,
+      isAuthenticated,
       isLoading,
       login,
       logout
