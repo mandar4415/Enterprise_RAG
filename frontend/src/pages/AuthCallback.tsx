@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useAuth } from '../hooks/useAuth';
+import { useAppDispatch, useAppSelector } from '../store/hooks';
+import { setCredentials } from '../features/auth/authSlice';
 import { Loader2 } from 'lucide-react';
 
 export default function AuthCallback() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { login, isAuthenticated } = useAuth();
+  const dispatch = useAppDispatch();
+  const { isAuthenticated } = useAppSelector(state => state.auth);
   const [error, setError] = useState<string | null>(null);
   const [processed, setProcessed] = useState(false);
 
@@ -23,7 +25,7 @@ export default function AuthCallback() {
       try {
         const user = JSON.parse(decodeURIComponent(userStr));
         console.log('AuthCallback: User parsed successfully', user);
-        login(token, user);
+        dispatch(setCredentials({ token, user }));
         setProcessed(true);
       } catch (e) {
         console.error("AuthCallback: Failed to parse user data", e);

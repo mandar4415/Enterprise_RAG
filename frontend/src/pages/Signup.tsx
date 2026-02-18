@@ -13,7 +13,8 @@ import {
 } from 'lucide-react';
 import { useNavigate, Link } from 'react-router-dom';
 import { authService } from '../api/services';
-import { useAuth } from '../hooks/useAuth';
+import { useAppDispatch } from '../store/hooks';
+import { setCredentials } from '../features/auth/authSlice';
 import './Signup.css';
 import './Login.css'; // Reuse some Login styles
 
@@ -21,7 +22,7 @@ type Step = 'signup' | 'verify' | 'success';
 
 export default function Signup() {
   const navigate = useNavigate();
-  const { login } = useAuth();
+  const dispatch = useAppDispatch();
   
   // Form state
   const [step, setStep] = useState<Step>('signup');
@@ -123,7 +124,7 @@ export default function Signup() {
     try {
       const response = await authService.verifyOtp(email, otpCode);
       // Save auth data
-      login(response.access_token, response.user);
+      dispatch(setCredentials({ token: response.access_token, user: response.user }));
       setStep('success');
       
       // Auto redirect after 2 seconds

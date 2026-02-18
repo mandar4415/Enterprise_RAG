@@ -8,7 +8,8 @@ import {
   Cpu
 } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { useAuth } from '../hooks/useAuth';
+import { useAppDispatch, useAppSelector } from '../store/hooks';
+import { logout as logoutAction } from '../features/auth/authSlice';
 import '../styles/Dashboard.css';
 
 interface DashboardLayoutProps {
@@ -18,10 +19,11 @@ interface DashboardLayoutProps {
 export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, logout } = useAuth();
+  const dispatch = useAppDispatch();
+  const { user } = useAppSelector(state => state.auth);
 
   const handleLogout = () => {
-    logout();
+    dispatch(logoutAction());
     navigate('/login');
   };
 

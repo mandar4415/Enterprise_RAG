@@ -1,61 +1,33 @@
 import React, { useEffect, useState } from 'react';
 import { Upload, FileText, Trash2, Clock, Database, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
 import DashboardLayout from '../components/DashboardLayout';
-import { ragService } from '../api/services';
+import { useAppDispatch, useAppSelector } from '../store/hooks';
+import { 
+  fetchDocuments, 
+  uploadDocument, 
+  deleteDocument,
+  clearDocError 
+} from '../features/documents/documentSlice';
 import './Documents.css';
 
-interface DocItem {
-  id: number;
-  filename: string;
-  title: string;
-  file_size: number;
-  created_at: string;
-  num_chunks: number;
-}
-
 export default function Documents() {
-  const [documents, setDocuments] = useState<DocItem[]>([]);
+  const dispatch = useAppDispatch();
+  const { 
+    items: documents, 
+    isLoading, 
+    isUploading, 
+    uploadProgress, 
+    error 
+  } = useAppSelector(state => state.documents);
+  
   const [isDragging, setIsDragging] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [uploadProgress, setUploadProgress] = useState<string>('');
 
   useEffect(() => {
-    loadDocuments();
-  }, []);
-
-  const loadDocuments = async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const data = await ragService.listDocuments();
-      setDocuments(data.documents || []);
-    } catch (err: any) {
-      console.error("Failed to list docs:", err);
-      setError(err.response?.data?.detail || "Failed to load documents");
-    } finally {
-      setIsLoading(false);
-    }
-  };
+    dispatch(fetchDocuments());
+  }, [dispatch]);
 
   const handleUpload = async (file: File) => {
-    setIsUploading(true);
-    setError(null);
-    setUploadProgress('Reading file...');
-    
-    try {
-      setUploadProgress('Uploading and processing...');
-      await ragService.uploadDocument(file);
-      setUploadProgress('Complete!');
-      await loadDocuments();
-    } catch (err: any) {
-      console.error("Upload failed:", err);
-      setError(err.response?.data?.detail || "Upload failed. Please try again.");
-    } finally {
-      setIsUploading(false);
-      setUploadProgress('');
-    }
+    dispatch(uploadDocument(file));
   };
 
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -67,14 +39,7 @@ export default function Documents() {
 
   const handleDelete = async (id: number, filename: string) => {
     if (!window.confirm(`Are you sure you want to delete "${filename}"?`)) return;
-    
-    try {
-      await ragService.deleteDocument(id);
-      setDocuments(prev => prev.filter(d => d.id !== id));
-    } catch (err: any) {
-      console.error("Delete failed", err);
-      setError(err.response?.data?.detail || "Failed to delete document");
-    }
+    dispatch(deleteDocument(id));
   };
 
   const onDragOver = (e: React.DragEvent) => {
@@ -139,7 +104,7 @@ export default function Documents() {
             <AlertCircle size={20} />
             <span>{error}</span>
             <button 
-              onClick={() => setError(null)}
+              onClick={() => dispatch(clearDocError())}
               style={{ marginLeft: 'auto', background: 'transparent', border: 'none', color: '#fca5a5', cursor: 'pointer' }}
             >
               ✕
